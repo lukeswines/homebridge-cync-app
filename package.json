@@ -1,0 +1,56 @@
+{
+	"name": "homebridge-cync-app",
+	"displayName": "Homebridge Cync App",
+	"type": "module",
+	"version": "0.0.1",
+	"private": true,
+	"description": "Homebridge plugin that integrates your GE Cync account (via the Cync app/API) and exposes all supported devices: plugs, lights, switches, etc",
+	"author": "Dustin Newell",
+	"license": "Apache-2.0",
+	"homepage": "https://github.com/dash16/homebridge-cync-app#readme",
+	"repository": {
+	"type": "git",
+	"url": "https://github.com/dash16/homebridge-cync-app.git"
+	},
+	"bugs": {
+	"url": "https://github.com/dash16/homebridge-cync-app/issues"
+	},
+	"keywords": [
+		"homebridge-plugin",
+		"homebridge",
+		"cync",
+		"ge cync",
+		"smart plug",
+		"smart lights",
+		"C by GE"
+	],
+	"main": "dist/index.js",
+	"homebridge": {
+		"pluginType": "platform",
+		"platform": "CyncAppPlatform"
+	},
+	"engines": {
+	"node": "^20.18.0 || ^22.10.0 || ^24.0.0",
+	"homebridge": "^1.8.0 || ^2.0.0-beta.0"
+	},
+	"scripts": {
+	"build": "rimraf ./dist && tsc",
+	"lint": "eslint . --max-warnings=0",
+	"prepublishOnly": "npm run lint && npm run build",
+	"watch": "npm run build && npm link && nodemon"
+	},
+	"dependencies": {
+	"homebridge-lib": "^7.1.12"
+	},
+	"devDependencies": {
+	"@eslint/js": "^9.39.1",
+	"@types/node": "^24.10.1",
+	"eslint": "^9.39.1",
+	"homebridge": "^2.0.0-beta.55",
+	"nodemon": "^3.1.11",
+	"rimraf": "^6.1.0",
+	"ts-node": "^10.9.2",
+	"typescript": "^5.9.3",
+	"typescript-eslint": "^8.46.4"
+	}
+}

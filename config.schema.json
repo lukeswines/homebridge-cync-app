@@ -1,0 +1,18 @@
+{
+	"pluginAlias": "CyncAppPlatform",
+	"pluginType": "platform",
+	"singular": true,
+	"strictValidation": false,
+	"schema": {
+	"type": "object",
+	"required": ["name"],
+	"additionalProperties": false,
+	"properties": {
+	  "name": {
+	    "title": "Platform Name",
+	    "type": "string",
+	    "default": "Cync App"
+	  }
+	}
+	}
+}

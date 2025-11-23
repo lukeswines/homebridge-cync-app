@@ -1,3 +1,6 @@
+#local reference
+/ref
+
 # macOS files
 .DS_Store
 
