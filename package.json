@@ -3,7 +3,7 @@
 	"displayName": "Homebridge Cync App",
 	"type": "module",
 	"version": "0.0.2",
-	"private": true,
+	"private": false,
 	"description": "Homebridge plugin that integrates your GE Cync account (via the Cync app/API) and exposes all supported devices: plugs, lights, switches, etc",
 	"author": "Dustin Newell",
 	"license": "Apache-2.0",
