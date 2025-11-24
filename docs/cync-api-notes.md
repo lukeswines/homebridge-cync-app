@@ -77,6 +77,19 @@ If successful, a verification code is emailed to the user.
 
 On success, the response includes the same fields as primary authentication and allows creation of the TCP login code.
 
+### **2.4 Token Persistence (Homebridge Plugin Behavior)**
+
+After successful 2FA login, the Homebridge plugin stores:
+
+- `access_token`
+- `user_id`
+- optional `refreshToken`
+- optional `expiresAt`
+
+Tokens are restored on startup via a local `cync-token.json` file.
+The Cync API often omits `expiresAt`, so the plugin must treat tokens as
+semi-permanent until an API error indicates otherwise.
+
 ---
 
 ## **3. Cloud Configuration Retrieval**
@@ -94,19 +107,93 @@ Each home entry includes:
 * `product_id`
 * `name`
 
-### **3.2 Retrieve Devices Within Home**
+#### Actual Response Structure (Observed)
 
-`GET /v2/product/{product_id}/device/{device_id}/property`
+Live queries show that `/subscribe/devices` returns **mesh-level objects**, *not*
+device lists. These objects include metadata fields but no per-device entries.
 
-**Returned fields include:**
+Discovered keys:
 
-* `groupsArray` — rooms
-* `bulbsArray` — devices
+- id
+- name
+- mac
+- product_id
+- access_key
+- authorize_code
+- role
+- source
+- is_active
+- is_online
+- subscribe_date
+- active_date
+- last_login
+- mcu_version
+- firmware_version
+- groups
 
-Devices represent switches, plugs, bulbs, sensors, and controllers.
+⚠️ **Important:**
+These meshes do *not* contain devices. Device lists are obtained from
+`/product/<product_id>/device/<mesh_id>/property` (see Section 3.2).
 
+### **3.2 Retrieve Devices Within a Mesh**
+
+`GET /v2/product/<product_id>/device/<mesh_id>/property`
+
+This endpoint returns the **actual list of devices** in a mesh.
+The top-level object includes fields such as:
+
+- `groupsArray`
+- `sceneArray`
+- `schedules`
+- `system`
+- `deviceIdRecord`
+- `ftsModel`
+- `bulbsArray` (primary device list)
+
+#### **Device Structure (from bulbsArray)**
+
+Each entry in `bulbsArray` represents a real Cync device such as a plug, switch,
+bulb, or sensor.
+
+Observed device keys:
+
+- `displayName`
+- `deviceID`
+- `wifiMac`
+- `deviceType`
+- `firmwareVersion`
+- `fadeOn`, `fadeOff`
+- `defaultBrightness`
+- `ambientLightEnable`
+- `ambientLightSensitivity`
+- `occupancyEnable`
+- `occupancyTimeoutPeriod`
+- `followTheSun`
+- `simpleModeEnabled`
+- `wifiSsid`
+- `wifiDisconnectIndicatorEnable`
+
+These fields provide enough metadata for:
+
+- Naming the accessory
+- Generating stable UUIDs in Homebridge
+- Determining capabilities (switch vs dimmer vs sensor)
+
+### **3.3 Discovery Model Summary**
+
+Cync cloud discovery requires combining two endpoints:
+
+1. `/subscribe/devices`
+   Provides *mesh-level* information (homes/networks) but no per-device data.
+
+2. `/product/<product_id>/device/<mesh_id>/property`
+   Provides the **actual device list** via `bulbsArray`.
+
+Because of this structure:
+
+- A mesh may appear empty in `/subscribe/devices` but still contain devices.
+- Device names and IDs must be extracted solely from `bulbsArray`.
 ---
-
 ## **4. Configuration Assembly Process**
 
 The integration processes cloud data into the following components:
@@ -121,6 +208,22 @@ The integration processes cloud data into the following components:
 
 * `switchID_to_homeID`:
   Reverse mapping from controller identifier → home identifier.
+
+#### **UUID Strategy (Homebridge Implementation)**
+
+To ensure stable and deterministic accessory identities, device UUIDs are
+generated using:
+`cync-${mesh.id}-${deviceID}`
+
+Where:
+
+- `deviceID` is taken from `deviceID`
+- If missing, fallback is `wifiMac` (colons removed)
+- Final fallback: `${mesh.id}-${product_id}`
+
+This ensures:
+- Accessories do not duplicate on restart
+- Renaming devices in the Cync app does not break HomeKit bindings
 
 ### **4.2 Device Records**
 
@@ -165,4 +268,15 @@ The upstream integration returns the following final structure:
 
 This dataset defines the full set of controllable Cync devices and establishes the mesh addressing required for TCP commands.
 
+### **TCP LAN Control (Not yet implemented)**
+
+Cync cloud discovery provides:
+
+- product_id
+- access_key
+- meshId
+
+These values will be used to establish a LAN session using:
+
+  `/tcp-client.connect(loginCode, config)`
 
