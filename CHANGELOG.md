@@ -1,5 +1,28 @@
 # Changelog
 
+## v0.0.2 – Cloud 2FA + device discovery
+
+**Release Date:** 2025-11-23
+
+### Added
+- Cync cloud 2FA login flow using email + password + one-time code.
+- Persistent token storage and automatic session restore on Homebridge restart.
+- Cloud configuration fetch via `/user/{userId}/subscribe/devices`.
+- Per-mesh property probe via `/product/{productId}/device/{meshId}/property`.
+- Device discovery from `bulbsArray` and mapping into Homebridge accessories.
+- Accessory UUIDs seeded from mesh ID + stable device ID for consistent caching.
+- Automatic accessory naming using Cync `displayName` (e.g. “Lower Outlet”, “Upper Outlet”).
+
+### Changed
+- Replaced the previous “dummy switch” with real Cync devices from the cloud.
+- Tightened logging around login, token restore, and cloud configuration loading.
+- Ensured all new TypeScript code is lint-clean (`no-explicit-any`, strict typing).
+
+### Known limitations
+- LAN / TCP control path is still stubbed: `On` characteristic logs requests but does not yet send real commands to devices.
+- Only basic on/off outlets have been exercised; lights/scenes/groups are not yet modelled as HomeKit accessories.
+- Token expiry / refresh is not yet implemented; a full re-login may be required if the token is revoked or expires.
+
 ## 0.0.1 – Initial Cync scaffold
 **Release Date:** 2025-11-22
 

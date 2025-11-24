@@ -1,6 +1,13 @@
 # homebridge-cync-app
 Homebridge plugin that integrates your GE Cync account (via the Cync app/API) and exposes all supported devices: plugs, lights, switches, etc.
 
+It currently supports:
+
+- Email + password + 2FA (one-time code) login
+- Persistent token storage in the Homebridge storage path
+- Discovery of Cync “meshes” and devices from the cloud
+- Exposing Cync outlets as HomeKit switches with their Cync `displayName`
+
 ## Installation
 
 1. Install via Homebridge UI (Plugins tab) or from the command line:
@@ -12,10 +19,49 @@ Homebridge plugin that integrates your GE Cync account (via the Cync app/API) an
 
 ## Configuration
 
-v0.0.1 is focused on validating login/config plumbing and platform registration.
- Device discovery and control are in progress and will land in later versions.
+Add a platform entry to your Homebridge `config.json`:
+
+```
+{
+  "platforms": [
+    {
+      "platform": "CyncAppPlatform",
+      "name": "Cync App (Dev)",
+      "username": "you@example.com",
+      "password": "your-cync-password",
+      "twoFactor": "123456"
+    }
+  ]
+}
+```
+### 2FA flow
+
+1. Start with no twoFactor field (or leave it empty).
+
+2. Start Homebridge:
+- The plugin asks Cync to send a 2FA code to your email.
+- In the log you’ll see:
+  - Cync: starting 2FA handshake for ...
+  - Cync: 2FA code sent to your email...
+
+3. Copy the code from your email.
+
+4. Add "twoFactor": "123456" (replace with your real code) to the plugin config and restart Homebridge.
+
+5. On successful login:
+- The plugin stores an access token in the Homebridge storage path.
+- On future restarts, it logs:
+  - CyncClient: using stored token for userId=...
+  - Cync: restored session from stored token; userId=...
+- No further 2FA input is needed unless the token expires or is revoked.
 
 ## Project Status & Roadmap
 - **0.0.1** – Initial scaffold, basic Homebridge platform, config wiring, and logging.
-- **0.1.0 (planned)** – Cync cloud login and device list discovery.
-- **0.2.0+ (planned)** – Individual accessories for switches, plugs, and lights; per-device control.
+- **0.0.2** - Cync cloud login and device list discovery.
+  - ✅ 2FA cloud login and token persistence
+  - ✅ Cloud discovery of meshes and outlets
+  - ✅ Basic HomeKit switch accessories with real Cync names
+- **0.0.3+ (planned)** – Individual accessories for switches, plugs, and lights; per-device control.
+- ⏳ TCP / LAN control path (actually turning devices on/off)
+- ⏳ Support for lights, scenes, and groups
+- ⏳ Token refresh / expiry handling
