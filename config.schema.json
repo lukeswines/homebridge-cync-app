@@ -1,18 +1,39 @@
 {
 	"pluginAlias": "CyncAppPlatform",
 	"pluginType": "platform",
-	"singular": true,
-	"strictValidation": false,
+
 	"schema": {
-	"type": "object",
-	"required": ["name"],
-	"additionalProperties": false,
-	"properties": {
-	  "name": {
-	    "title": "Platform Name",
-	    "type": "string",
-	    "default": "Cync App"
-	  }
-	}
+		"type": "object",
+		"properties": {
+			"name": {
+				"title": "Name",
+				"type": "string",
+				"default": "Cync",
+				"description": "Name of the platform as shown in Homebridge."
+			},
+			"username": {
+				"title": "Cync Email",
+				"type": "string",
+				"format": "email",
+				"description": "Email address you use to sign in to the Cync app."
+			},
+			"password": {
+				"title": "Cync Password",
+				"type": "string",
+				"format": "password",
+				"description": "Password for your Cync account."
+			},
+			"twoFactor": {
+				"title": "Two-Factor Code (OTP)",
+				"type": "string",
+				"pattern": "^[0-9]{6}$",
+				"description": "Temporary 6-digit code emailed by Cync when you sign in. Leave blank normally; only needed when performing a fresh login."
+			}
+		},
+		"required": [
+			"name",
+			"username",
+			"password"
+		]
 	}
 }

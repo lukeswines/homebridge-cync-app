@@ -1,3 +1,4 @@
+// src/cync/config-client.ts
 // Cync cloud configuration & login client.
 // Handles 2FA email flow and basic device/config queries against api.gelighting.com.
 //
@@ -7,14 +8,41 @@
 const CYNC_API_BASE = 'https://api.gelighting.com/v2/';
 const CORP_ID = '1007d2ad150c4000';
 
-// Node 18+ exposes a global fetch() at runtime. Declare it as any so TypeScript
-// does not complain even when the DOM lib is not enabled in tsconfig.
-declare const fetch: any;
+// Minimal fetch/response typing for Node 18+, without depending on DOM lib types.
+type FetchLike = (input: unknown, init?: unknown) => Promise<unknown>;
+
+declare const fetch: FetchLike;
+
+type HttpResponse = {
+	ok: boolean;
+	status: number;
+	statusText: string;
+	json(): Promise<unknown>;
+	text(): Promise<string>;
+};
+
+type CyncErrorBody = {
+	error?: {
+		msg?: string;
+		[key: string]: unknown;
+	};
+	[key: string]: unknown;
+};
 
 export interface CyncLoginSession {
 	accessToken: string;
 	userId: string;
 	raw: unknown;
+}
+
+export interface CyncDevice {
+	id: string;
+	name?: string;
+	product_id?: string;
+	device_id?: string;
+	mac?: string;
+	sn?: string;
+	[key: string]: unknown;
 }
 
 export interface CyncDeviceMesh {
@@ -24,7 +52,7 @@ export interface CyncDeviceMesh {
 	access_key?: string;
 	mac?: string;
 	properties?: Record<string, unknown>;
-	// The cloud API returns many more fields; we keep this loose for now.
+	devices?: CyncDevice[];
 	[key: string]: unknown;
 }
 
@@ -77,13 +105,13 @@ export class ConfigClient {
 			local_lang: 'en-us',
 		};
 
-		const res = await fetch(url, {
+		const res = (await fetch(url, {
 			method: 'POST',
 			headers: {
 				'Content-Type': 'application/json',
 			},
 			body: JSON.stringify(body),
-		});
+		})) as HttpResponse;
 
 		if (!res.ok) {
 			const text = await res.text().catch(() => '');
@@ -121,18 +149,18 @@ export class ConfigClient {
 			resource: ConfigClient.randomLoginResource(),
 		};
 
-		const res = await fetch(url, {
+		const res = (await fetch(url, {
 			method: 'POST',
 			headers: {
 				'Content-Type': 'application/json',
 			},
 			body: JSON.stringify(body),
-		});
+		})) as HttpResponse;
 
-		const json = (await res.json().catch(async () => {
+		const json: unknown = await res.json().catch(async () => {
 			const text = await res.text().catch(() => '');
 			throw new Error(`Cync login returned non-JSON payload: ${text}`);
-		})) as any;
+		});
 
 		if (!res.ok) {
 			this.log.error(
@@ -141,14 +169,29 @@ export class ConfigClient {
 				res.statusText,
 				json,
 			);
+			const errBody = json as CyncErrorBody;
 			throw new Error(
-				json?.error?.msg ??
-					`Cync login failed with status ${res.status} ${res.statusText}`,
+				errBody.error?.msg ??
+				`Cync login failed with status ${res.status} ${res.statusText}`,
 			);
 		}
 
-		const accessToken = json?.access_token as string | undefined;
-		const userId = json?.user_id as string | undefined;
+		const obj = json as Record<string, unknown>;
+		this.log.debug('Cync login response: keys=%o', Object.keys(obj));
+
+		// Accept both snake_case and camelCase, and both string/number user_id.
+		const accessTokenRaw = obj.access_token ?? obj.accessToken;
+		const userIdRaw = obj.user_id ?? obj.userId;
+
+		const accessToken =
+			typeof accessTokenRaw === 'string' && accessTokenRaw.length > 0
+				? accessTokenRaw
+				: undefined;
+
+		const userId =
+			userIdRaw !== undefined && userIdRaw !== null
+				? String(userIdRaw)
+				: undefined;
 
 		if (!accessToken || !userId) {
 			this.log.error('Cync login missing access_token or user_id: %o', json);
@@ -183,15 +226,15 @@ export class ConfigClient {
 
 		this.log.debug('Fetching Cync devices from %s', devicesUrl);
 
-		const res = await fetch(devicesUrl, {
+		const res = (await fetch(devicesUrl, {
 			method: 'GET',
 			headers,
-		});
+		})) as HttpResponse;
 
-		const json = (await res.json().catch(async () => {
+		const json: unknown = await res.json().catch(async () => {
 			const text = await res.text().catch(() => '');
 			throw new Error(`Cync devices returned non-JSON payload: ${text}`);
-		})) as any;
+		});
 
 		if (!res.ok) {
 			this.log.error(
@@ -200,21 +243,59 @@ export class ConfigClient {
 				res.statusText,
 				json,
 			);
-			const msg = json?.error?.msg ?? 'Unknown error from Cync devices API';
+			const errBody = json as CyncErrorBody;
+			const msg = errBody.error?.msg ?? 'Unknown error from Cync devices API';
 			throw new Error(msg);
 		}
 
-		if (json?.error) {
-			this.log.error('Cync devices API error: %o', json.error);
-			throw new Error(json.error.msg ?? 'Cync devices API error');
+		// DEBUG: log high-level shape without dumping any secrets.
+		if (Array.isArray(json)) {
+			this.log.debug(
+				'Cync devices payload: top-level array length=%d; first item keys=%o',
+				json.length,
+				json.length > 0 ? Object.keys((json as Record<string, unknown>[])[0]) : [],
+			);
+		} else if (json && typeof json === 'object') {
+			this.log.debug(
+				'Cync devices payload: top-level object keys=%o',
+				Object.keys(json as Record<string, unknown>),
+			);
+		} else {
+			this.log.debug(
+				'Cync devices payload: top-level type=%s',
+				typeof json,
+			);
 		}
 
-		// The cloud returns an array of mesh networks; we normalise to our interface.
-		const meshes: CyncDeviceMesh[] = Array.isArray(json)
-			? (json as CyncDeviceMesh[])
-			: [];
+		// Some Cync responses wrap arrays; others are raw arrays.
+		let meshes: CyncDeviceMesh[] = [];
+
+		if (Array.isArray(json)) {
+			meshes = json as CyncDeviceMesh[];
+		} else if (json && typeof json === 'object') {
+			const obj = json as Record<string, unknown>;
+
+			// Best guess: devices may be under a named property.
+			// We just log for now; once we see the payload, we can wire this properly.
+			this.log.debug(
+				'Cync devices payload (object) example values for known keys=%o',
+				{
+					dataType: typeof obj.data,
+					devicesType: typeof (obj.devices as unknown),
+					meshesType: typeof (obj.meshes as unknown),
+				},
+			);
+
+			// Temporary: if there's a "data" array, treat that as meshes.
+			if (Array.isArray(obj.data)) {
+				meshes = obj.data as CyncDeviceMesh[];
+			} else if (Array.isArray(obj.meshes)) {
+				meshes = obj.meshes as CyncDeviceMesh[];
+			}
+		}
 
 		return { meshes };
+
 	}
 
 	/**
@@ -226,21 +307,21 @@ export class ConfigClient {
 	): Promise<Record<string, unknown>> {
 		this.ensureSession();
 
-		const url = `https://api.gelighting.com/v2/product/${encodeURIComponent(
+		const url = `${CYNC_API_BASE}product/${encodeURIComponent(
 			productId,
 		)}/device/${encodeURIComponent(deviceId)}/property`;
 
-		const res = await fetch(url, {
+		const res = (await fetch(url, {
 			method: 'GET',
 			headers: {
 				'Access-Token': this.accessToken as string,
 			},
-		});
+		})) as HttpResponse;
 
-		const json = (await res.json().catch(async () => {
+		const json: unknown = await res.json().catch(async () => {
 			const text = await res.text().catch(() => '');
 			throw new Error(`Cync properties returned non-JSON payload: ${text}`);
-		})) as any;
+		});
 
 		if (!res.ok) {
 			this.log.error(
@@ -249,16 +330,20 @@ export class ConfigClient {
 				res.statusText,
 				json,
 			);
+			const errBody = json as CyncErrorBody;
 			const msg =
-				json?.error?.msg ?? `Cync properties failed with ${res.status}`;
+				errBody.error?.msg ?? `Cync properties failed with ${res.status}`;
 			throw new Error(msg);
 		}
 
-		if (json?.error) {
-			this.log.warn('Cync properties API error: %o', json.error);
-		}
-
+		// We keep this as a loose record; callers can shape it as needed.
 		return json as Record<string, unknown>;
+	}
+
+	public restoreSession(accessToken: string, userId: string): void {
+		this.accessToken = accessToken;
+		this.userId = userId;
+		this.log.info('Cync: restored session from stored token; userId=%s', userId);
 	}
 
 	public getSessionSnapshot(): { accessToken: string | null; userId: string | null } {

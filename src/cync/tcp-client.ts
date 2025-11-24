@@ -1,8 +1,9 @@
+// src/cync/tcp-client.ts
 // Thin TCP client stub for talking to Cync WiFi devices.
 // The binary protocol is non-trivial; for now this class only logs calls so
 // that higher layers can be wired up and tested without crashing.
 
-import { CyncCloudConfig, CyncLogger } from './config-client';
+import { CyncCloudConfig, CyncLogger } from './config-client.js';
 
 const defaultLogger: CyncLogger = {
 	debug: (...args: unknown[]) => console.debug('[cync-tcp]', ...args),
