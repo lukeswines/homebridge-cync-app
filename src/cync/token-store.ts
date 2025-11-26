@@ -6,7 +6,9 @@ export interface CyncTokenData {
 	userId: string;
 	accessToken: string;
 	refreshToken?: string;
-	expiresAt?: number; // epoch ms, optional if Cync doesn't provide expiry
+	expiresAt?: number;
+	authorize?: string;
+	lanLoginCode?: string;
 }
 
 /**

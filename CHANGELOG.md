@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.0 – LAN Control Preview
+
+- Implemented TCP client for Cync LAN bridge using the cloud-provided login code.
+- Added real on/off control for Cync smart plugs directly from HomeKit.
+- Wired HomeKit `On` characteristic handlers to TCP transport.
+- Subscribed to Cync device updates and propagate state changes back into HomeKit.
+- Improved logging around cloud configuration loading, LAN login, and TCP connection lifecycle.
+- Known scope: tested only with Cync smart plugs; other device types are currently untested and may not appear or function correctly.
+
 ## v0.0.2 – Cloud 2FA + device discovery
 
 **Release Date:** 2025-11-23

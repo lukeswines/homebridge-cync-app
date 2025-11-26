@@ -8,6 +8,8 @@ It currently supports:
 - Discovery of Cync “meshes” and devices from the cloud
 - Exposing Cync outlets as HomeKit switches with their Cync `displayName`
 
+> Status: **Early LAN preview.** Tested with Cync smart plugs only. Other device types may not appear or may behave incorrectly.
+
 ## Installation
 
 1. Install via Homebridge UI (Plugins tab) or from the command line:
@@ -61,7 +63,8 @@ Add a platform entry to your Homebridge `config.json`:
   - ✅ 2FA cloud login and token persistence
   - ✅ Cloud discovery of meshes and outlets
   - ✅ Basic HomeKit switch accessories with real Cync names
-- **0.0.3+ (planned)** – Individual accessories for switches, plugs, and lights; per-device control.
-- ⏳ TCP / LAN control path (actually turning devices on/off)
-- ⏳ Support for lights, scenes, and groups
-- ⏳ Token refresh / expiry handling
+- **0.1.0** – Individual accessories for plugs; per-device control.  Switches, sensors and lights have not yet been tested and may not work.
+- HomeKit can now control Cync smart plugs directly over the Cync LAN bridge.
+- Switch states update independently and stay in sync between the Cync app and HomeKit.
+- Cloud config is still used for login + topology, but ongoing control is via TCP.
+

@@ -32,6 +32,7 @@ type CyncErrorBody = {
 export interface CyncLoginSession {
 	accessToken: string;
 	userId: string;
+	authorize?: string;
 	raw: unknown;
 }
 
@@ -42,6 +43,10 @@ export interface CyncDevice {
 	device_id?: string;
 	mac?: string;
 	sn?: string;
+	switch_id?: string;
+	switch_controller?: number | string;
+	mesh_id?: number | string;
+
 	[key: string]: unknown;
 }
 
@@ -84,6 +89,7 @@ export class ConfigClient {
 	// These are populated after a successful 2FA login.
 	private accessToken: string | null = null;
 	private userId: string | null = null;
+	private authorize: string | null = null;
 
 	constructor(logger?: CyncLogger) {
 		this.log = logger ?? defaultLogger;
@@ -182,6 +188,7 @@ export class ConfigClient {
 		// Accept both snake_case and camelCase, and both string/number user_id.
 		const accessTokenRaw = obj.access_token ?? obj.accessToken;
 		const userIdRaw = obj.user_id ?? obj.userId;
+		const authorizeRaw = obj.authorize;
 
 		const accessToken =
 			typeof accessTokenRaw === 'string' && accessTokenRaw.length > 0
@@ -193,6 +200,11 @@ export class ConfigClient {
 				? String(userIdRaw)
 				: undefined;
 
+		const authorize =
+			typeof authorizeRaw === 'string' && authorizeRaw.length > 0
+				? authorizeRaw
+				: undefined;
+
 		if (!accessToken || !userId) {
 			this.log.error('Cync login missing access_token or user_id: %o', json);
 			throw new Error('Cync login response missing access_token or user_id');
@@ -200,12 +212,14 @@ export class ConfigClient {
 
 		this.accessToken = accessToken;
 		this.userId = userId;
+		this.authorize = authorize ?? null;
 
 		this.log.info('Cync login successful; userId=%s', userId);
 
 		return {
 			accessToken,
 			userId,
+			authorize,
 			raw: json,
 		};
 	}
@@ -357,6 +371,47 @@ export class ConfigClient {
 		if (!this.accessToken || !this.userId) {
 			throw new Error('Cync session not initialised. Call loginWithTwoFactor() first.');
 		}
+	}
+	// ### 🧩 LAN Login Blob Builder: Generates the auth_code payload used by Cync LAN TCP
+	public static buildLanLoginCode(userId: string, authorize: string): Uint8Array {
+		const authBytes = Buffer.from(authorize, 'ascii');
+		const lengthByte = 10 + authBytes.length;
+
+		if (lengthByte > 0xff) {
+			throw new Error('Cync LAN authorize token too long to encode.');
+		}
+
+		const userIdNum = Number.parseInt(userId, 10);
+		if (!Number.isFinite(userIdNum) || userIdNum < 0) {
+			throw new Error(`Invalid Cync userId for LAN auth: ${userId}`);
+		}
+
+		const header = Buffer.from('13000000', 'hex');
+
+		const lenBuf = Buffer.alloc(1);
+		lenBuf.writeUInt8(lengthByte & 0xff, 0);
+
+		const cmdBuf = Buffer.from('03', 'hex');
+
+		const userIdBuf = Buffer.alloc(4);
+		userIdBuf.writeUInt32BE(userIdNum >>> 0, 0);
+
+		const authLenBuf = Buffer.alloc(2);
+		authLenBuf.writeUInt16BE(authBytes.length, 0);
+
+		const tail = Buffer.from('0000b4', 'hex');
+
+		const loginBuf = Buffer.concat([
+			header,
+			lenBuf,
+			cmdBuf,
+			userIdBuf,
+			authLenBuf,
+			authBytes,
+			tail,
+		]);
+
+		return new Uint8Array(loginBuf);
 	}
 
 	private static randomLoginResource(): string {

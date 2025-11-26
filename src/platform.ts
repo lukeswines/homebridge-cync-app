@@ -10,7 +10,7 @@ import type {
 import { PLATFORM_NAME } from './settings.js';
 import { CyncClient } from './cync/cync-client.js';
 import { ConfigClient } from './cync/config-client.js';
-import type { CyncCloudConfig } from './cync/config-client.js';
+import type { CyncCloudConfig, CyncDevice, CyncDeviceMesh } from './cync/config-client.js';
 import { TcpClient } from './cync/tcp-client.js';
 import type { CyncLogger } from './cync/config-client.js';
 
@@ -26,6 +26,7 @@ interface CyncAccessoryContext {
 		meshId: string;
 		deviceId: string;
 		productId?: string;
+		on?: boolean;
 	};
 	[key: string]: unknown;
 }
@@ -45,8 +46,118 @@ export class CyncAppPlatform implements DynamicPlatformPlugin {
 	private readonly api: API;
 	private readonly config: PlatformConfig;
 	private readonly client: CyncClient;
+	private readonly tcpClient: TcpClient;
 
 	private cloudConfig: CyncCloudConfig | null = null;
+	private readonly deviceIdToAccessory = new Map<string, PlatformAccessory>();
+	private handleLanUpdate(update: unknown): void {
+		// We only care about parsed 0x83 frames that look like:
+		// { controllerId: number, on: boolean, level: number, deviceId?: string }
+		const payload = update as { deviceId?: string; on?: boolean };
+
+		if (!payload || typeof payload.deviceId !== 'string' || typeof payload.on !== 'boolean') {
+			return;
+		}
+
+		const accessory = this.deviceIdToAccessory.get(payload.deviceId);
+		if (!accessory) {
+			this.log.debug(
+				'Cync: LAN update for unknown deviceId=%s; no accessory mapping',
+				payload.deviceId,
+			);
+			return;
+		}
+
+		const service = accessory.getService(this.api.hap.Service.Switch);
+		if (!service) {
+			this.log.debug(
+				'Cync: accessory %s has no Switch service for deviceId=%s',
+				accessory.displayName,
+				payload.deviceId,
+			);
+			return;
+		}
+
+		// Update cached context state
+		const ctx = accessory.context as CyncAccessoryContext;
+		ctx.cync = ctx.cync ?? {
+			meshId: '',
+			deviceId: payload.deviceId,
+		};
+		ctx.cync.on = payload.on;
+
+		this.log.info(
+			'Cync: LAN update -> %s is now %s (deviceId=%s)',
+			accessory.displayName,
+			payload.on ? 'ON' : 'OFF',
+			payload.deviceId,
+		);
+
+		// Push the new state into HomeKit
+		service.updateCharacteristic(this.api.hap.Characteristic.On, payload.on);
+	}
+
+	private configureCyncSwitchAccessory(
+		mesh: CyncDeviceMesh,
+		device: CyncDevice,
+		accessory: PlatformAccessory,
+		deviceName: string,
+		deviceId: string,
+	): void {
+		const service =
+			accessory.getService(this.api.hap.Service.Switch) ||
+			accessory.addService(this.api.hap.Service.Switch, deviceName);
+
+		// Ensure context is initialized
+		const ctx = accessory.context as CyncAccessoryContext;
+		ctx.cync = ctx.cync ?? {
+			meshId: mesh.id,
+			deviceId,
+			productId: device.product_id,
+			on: false,
+		};
+
+		// Remember mapping for LAN updates
+		this.deviceIdToAccessory.set(deviceId, accessory);
+
+		service
+			.getCharacteristic(this.api.hap.Characteristic.On)
+			.onGet(() => {
+				const currentOn = !!ctx.cync?.on;
+				this.log.info(
+					'Cync: On.get -> %s for %s (deviceId=%s)',
+					String(currentOn),
+					deviceName,
+					deviceId,
+				);
+				return currentOn;
+			})
+			.onSet(async (value) => {
+				const cyncMeta = ctx.cync;
+
+				if (!cyncMeta?.deviceId) {
+					this.log.warn(
+						'Cync: On.set called for %s but no cync.deviceId in context',
+						deviceName,
+					);
+					return;
+				}
+
+				const on = value === true || value === 1;
+
+				this.log.info(
+					'Cync: On.set -> %s for %s (deviceId=%s)',
+					String(on),
+					deviceName,
+					cyncMeta.deviceId,
+				);
+
+				// Optimistic local cache; LAN update will confirm
+				cyncMeta.on = on;
+
+				await this.tcpClient.setSwitchState(cyncMeta.deviceId, { on });
+			});
+	}
 
 	constructor(log: Logger, config: PlatformConfig, api: API) {
 		this.log = log;
@@ -59,19 +170,27 @@ export class CyncAppPlatform implements DynamicPlatformPlugin {
 		const password = cfg.password as string | undefined;
 		const twoFactor = cfg.twoFactor as string | undefined;
 
-		// Initialize the Cync client with platform logger so all messages
-		// appear in the Homebridge log.
+		const cyncLogger = toCyncLogger(this.log);
+		const tcpClient = new TcpClient(cyncLogger);
+
 		this.client = new CyncClient(
-			new ConfigClient(toCyncLogger(this.log)),
-			new TcpClient(toCyncLogger(this.log)),
+			new ConfigClient(cyncLogger),
+			tcpClient,
 			{
 				email: username ?? '',
 				password: password ?? '',
 				twoFactor,
 			},
 			this.api.user.storagePath(),
-			toCyncLogger(this.log),
+			cyncLogger,
 		);
+
+		this.tcpClient = tcpClient;
+
+		// Bridge LAN updates into Homebridge
+		this.client.onLanDeviceUpdate((update) => {
+			this.handleLanUpdate(update);
+		});
 
 		this.log.info(this.config.name ?? PLATFORM_NAME, 'initialized');
 
@@ -114,10 +233,37 @@ export class CyncAppPlatform implements DynamicPlatformPlugin {
 
 			this.log.info(
 				'Cync: cloud configuration loaded; mesh count=%d',
-				cloudConfig?.meshes?.length ?? 0,
+				cloudConfig.meshes.length,
 			);
 
+			// Ask the CyncClient for the LAN login code derived from stored session.
+			// If it returns an empty blob, LAN is disabled but cloud still works.
+			let loginCode: Uint8Array = new Uint8Array();
+			try {
+				loginCode = this.client.getLanLoginCode();
+			} catch (err) {
+				this.log.warn(
+					'Cync: getLanLoginCode() failed: %s',
+					(err as Error).message ?? String(err),
+				);
+			}
+
+			if (loginCode.length > 0) {
+				this.log.info(
+					'Cync: LAN login code available (%d bytes); starting TCP transport…',
+					loginCode.length,
+				);
+
+				// ### 🧩 LAN Transport Bootstrap: wire frame listeners via CyncClient
+				await this.client.startTransport(cloudConfig, loginCode);
+			} else {
+				this.log.info(
+					'Cync: LAN login code unavailable; TCP control disabled (cloud-only).',
+				);
+			}
+
 			this.discoverDevices(cloudConfig);
+
 		} catch (err) {
 			this.log.error(
 				'Cync: cloud login failed: %s',
@@ -128,8 +274,7 @@ export class CyncAppPlatform implements DynamicPlatformPlugin {
 
 	/**
 	 * Discover devices from the Cync cloud config and register them as
-	 * Homebridge accessories. For now, each device is exposed as a simple
-	 * dummy Switch that logs state changes.
+	 * Homebridge accessories.
 	 */
 	private discoverDevices(cloudConfig: CyncCloudConfig): void {
 		if (!cloudConfig.meshes?.length) {
@@ -148,11 +293,12 @@ export class CyncAppPlatform implements DynamicPlatformPlugin {
 			}
 
 			for (const device of devices) {
-				const deviceId = `${device.id ??
-					device.device_id ??
-					device.mac ??
-					device.sn ??
-					`${mesh.id}-${device.product_id ?? 'unknown'}`}`;
+				const deviceId =
+					(device.device_id as string | undefined) ??
+					(device.id as string) ??
+					(device.mac as string | undefined) ??
+					(device.sn as string | undefined) ??
+					`${mesh.id}-${device.product_id ?? 'unknown'}`;
 
 				const preferredName =
 					(device.name as string | undefined) ??
@@ -163,47 +309,27 @@ export class CyncAppPlatform implements DynamicPlatformPlugin {
 				const uuidSeed = `cync-${mesh.id}-${deviceId}`;
 				const uuid = this.api.hap.uuid.generate(uuidSeed);
 
-				const existing = this.accessories.find(acc => acc.UUID === uuid);
-				if (existing) {
+				let accessory = this.accessories.find(acc => acc.UUID === uuid);
+
+				if (accessory) {
 					this.log.info('Cync: using cached accessory for %s (%s)', deviceName, uuidSeed);
-					continue;
+				} else {
+					this.log.info('Cync: registering new accessory for %s (%s)', deviceName, uuidSeed);
+
+					accessory = new this.api.platformAccessory(deviceName, uuid);
+
+					this.api.registerPlatformAccessories(
+						'homebridge-cync-app',
+						'CyncAppPlatform',
+						[accessory],
+					);
+
+					this.accessories.push(accessory);
 				}
 
-				this.log.info('Cync: registering new accessory for %s (%s)', deviceName, uuidSeed);
-
-				const accessory = new this.api.platformAccessory(deviceName, uuid);
-
-				// Simple Switch service for now
-				const service =
-					accessory.getService(this.api.hap.Service.Switch) ||
-					accessory.addService(this.api.hap.Service.Switch, deviceName);
-
-				service
-					.getCharacteristic(this.api.hap.Characteristic.On)
-					.onGet(() => {
-						this.log.info('Cync: On.get -> false for %s', deviceName);
-						return false;
-					})
-					.onSet((value) => {
-						this.log.info('Cync: On.set -> %s for %s', String(value), deviceName);
-					});
-
-				// Context for later TCP control
-				const ctx = accessory.context as CyncAccessoryContext;
-				ctx.cync = {
-					meshId: mesh.id,
-					deviceId,
-					productId: device.product_id,
-				};
-
-				this.api.registerPlatformAccessories(
-					'homebridge-cync-app',
-					'CyncAppPlatform',
-					[accessory],
-				);
-
-				this.accessories.push(accessory);
+				this.configureCyncSwitchAccessory(mesh, device, accessory, deviceName, deviceId);
 			}
 		}
 	}
+
 }

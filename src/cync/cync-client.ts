@@ -36,8 +36,36 @@ export class CyncClient {
 	private session: CyncLoginSession | null = null;
 	private cloudConfig: CyncCloudConfig | null = null;
 
+	// ### 🧩 LAN Topology Cache: mirrors HA's home_devices / home_controllers / switchID_to_homeID
+	private homeDevices: Record<string, string[]> = {};
+	private homeControllers: Record<string, number[]> = {};
+	private switchIdToHomeId: Record<number, string> = {};
+
 	// Credentials from config.json, used to drive 2FA bootstrap.
 	private readonly loginConfig: { email: string; password: string; twoFactor?: string };
+
+	// Optional LAN update hook for the platform
+	private lanUpdateHandler: ((update: unknown) => void) | null = null;
+
+	// ### 🧩 LAN Update Bridge: allow platform to handle device updates
+	public onLanDeviceUpdate(handler: (update: unknown) => void): void {
+		this.lanUpdateHandler = handler;
+	}
+
+	// ### 🧩 LAN Auth Blob Getter: Returns the LAN login code if available
+	public getLanLoginCode(): Uint8Array {
+		if (!this.tokenData?.lanLoginCode) {
+			this.log.debug('CyncClient: getLanLoginCode() → no LAN blob in token store.');
+			return new Uint8Array();
+		}
+
+		try {
+			return Uint8Array.from(Buffer.from(this.tokenData.lanLoginCode, 'base64'));
+		} catch {
+			this.log.warn('CyncClient: stored LAN login code is invalid base64.');
+			return new Uint8Array();
+		}
+	}
 
 	constructor(
 		configClient: ConfigClient,
@@ -52,6 +80,32 @@ export class CyncClient {
 
 		this.loginConfig = loginConfig;
 		this.tokenStore = new CyncTokenStore(storagePath);
+	}
+	// ### 🧩 LAN Login Code Builder
+	private buildLanLoginCode(authorize: string, userId: number): Uint8Array {
+		const authorizeBytes = Buffer.from(authorize, 'ascii');
+
+		const head = Buffer.from('13000000', 'hex');
+		const lengthByte = Buffer.from([10 + authorizeBytes.length]);
+		const tag = Buffer.from('03', 'hex');
+
+		const userIdBytes = Buffer.alloc(4);
+		userIdBytes.writeUInt32BE(userId);
+
+		const authLenBytes = Buffer.alloc(2);
+		authLenBytes.writeUInt16BE(authorizeBytes.length);
+
+		const tail = Buffer.from('0000b4', 'hex');
+
+		return Buffer.concat([
+			head,
+			lengthByte,
+			tag,
+			userIdBytes,
+			authLenBytes,
+			authorizeBytes,
+			tail,
+		]);
 	}
 
 	/**
@@ -104,11 +158,30 @@ export class CyncClient {
 			String(twoFactor).trim(),
 		);
 
+		// Build LAN login code
+		let authorize: string | undefined;
+		let lanLoginCode: string | undefined;
+
+		const raw = loginResult.raw as Record<string, unknown>;
+		if (typeof raw.authorize === 'string') {
+			authorize = raw.authorize;
+
+			const lanBlob = this.buildLanLoginCode(authorize, Number(loginResult.userId));
+			lanLoginCode = Buffer.from(lanBlob).toString('base64');
+		} else {
+			this.log.warn(
+				'CyncClient: login response missing "authorize"; LAN login will be disabled.',
+			);
+		}
+
 		const tokenData: CyncTokenData = {
 			userId: String(loginResult.userId),
 			accessToken: loginResult.accessToken,
 			refreshToken: loginResult.refreshToken,
 			expiresAt: loginResult.expiresAt ?? undefined,
+
+			authorize,
+			lanLoginCode,
 		};
 
 		await this.tokenStore.save(tokenData);
@@ -145,6 +218,13 @@ export class CyncClient {
 		}
 	> {
 		const session = await this.submitTwoFactor(email, password, code);
+		// Extract authorize field from session.raw (Cync returns it)
+		const raw = session.raw as Record<string, unknown>;
+		const authorize = typeof raw?.authorize === 'string' ? raw.authorize : undefined;
+
+		if (!authorize) {
+			throw new Error('CyncClient: missing "authorize" field from login response; LAN login cannot be generated.');
+		}
 
 		const s = session as unknown as SessionWithPossibleTokens;
 
@@ -158,6 +238,7 @@ export class CyncClient {
 			accessToken: access,
 			refreshToken: s.refreshToken ?? s.refreshJwt,
 			expiresAt: s.expiresAt,
+			authorize,
 		};
 	}
 
@@ -190,6 +271,13 @@ export class CyncClient {
 				expiresAt: tokenData.expiresAt,
 			},
 		};
+		// Restore LAN auth blob into memory
+		if (tokenData.authorize && tokenData.lanLoginCode) {
+			this.log.debug('CyncClient: LAN login code restored from token store.');
+			// nothing else needed — getLanLoginCode() will use it
+		} else {
+			this.log.debug('CyncClient: token store missing LAN login fields.');
+		}
 
 		this.log.debug(
 			'CyncClient: access token applied from %s; userId=%s, expiresAt=%s',
@@ -262,6 +350,10 @@ export class CyncClient {
 
 	/**
 	 * Fetch and cache the cloud configuration (meshes/devices) for the logged-in user.
+	 * Also builds HA-style LAN topology mappings:
+	 *  - homeDevices[homeId][meshIndex] -> deviceId
+	 *  - homeControllers[homeId] -> controllerIds[]
+	 *  - switchIdToHomeId[controllerId] -> homeId
 	 */
 	public async loadConfiguration(): Promise<CyncCloudConfig> {
 		this.ensureSession();
@@ -269,15 +361,26 @@ export class CyncClient {
 		this.log.info('CyncClient: loading Cync cloud configuration…');
 		const cfg = await this.configClient.getCloudConfig();
 
+		// Reset LAN topology caches on each reload
+		this.homeDevices = {};
+		this.homeControllers = {};
+		this.switchIdToHomeId = {};
+
 		// Debug: inspect per-mesh properties so we can find the real devices.
 		for (const mesh of cfg.meshes) {
 			const meshName = mesh.name ?? mesh.id;
+			const homeId = String(mesh.id);
+
 			this.log.debug(
 				'CyncClient: probing properties for mesh %s (id=%s, product_id=%s)',
 				meshName,
 				mesh.id,
 				mesh.product_id,
 			);
+
+			// Per-home maps, mirroring HA's CyncUserData.get_cync_config()
+			const homeDevices: string[] = [];
+			const homeControllers: number[] = [];
 
 			try {
 				const props = await this.configClient.getDeviceProperties(
@@ -293,6 +396,7 @@ export class CyncClient {
 
 				type DeviceProps = Record<string, unknown>;
 				const bulbsArray = (props as DeviceProps).bulbsArray as unknown;
+
 				if (Array.isArray(bulbsArray)) {
 					this.log.info(
 						'CyncClient: mesh %s bulbsArray length=%d; first item keys=%o',
@@ -302,32 +406,105 @@ export class CyncClient {
 					);
 
 					type RawDevice = Record<string, unknown>;
-
 					const rawDevices = bulbsArray as unknown[];
 
-					(mesh as Record<string, unknown>).devices = rawDevices.map((raw: unknown) => {
+					const devicesForMesh: unknown[] = [];
+
+					for (const raw of rawDevices) {
 						const d = raw as RawDevice;
 
 						const displayName = d.displayName as string | undefined;
-						const deviceID = (d.deviceID ?? d.deviceId) as string | undefined;
+
+						// deviceID can be number or string – normalize to string
+						const deviceIdRaw = (d.deviceID ?? d.deviceId) as string | number | undefined;
+						const deviceIdStr =
+							deviceIdRaw !== undefined && deviceIdRaw !== null
+								? String(deviceIdRaw)
+								: undefined;
+
 						const wifiMac = d.wifiMac as string | undefined;
-						const productId = (d.product_id as string | undefined) ?? mesh.product_id;
+						const productId =
+							(d.product_id as string | undefined) ?? mesh.product_id;
+
+						// Reproduce HA's mesh index calculation:
+						// current_index = ((deviceID % home_id) % 1000) + (int((deviceID % home_id) / 1000) * 256)
+						const homeIdNum = Number(mesh.id);
+						const deviceIdNum =
+							typeof deviceIdRaw === 'number'
+								? deviceIdRaw
+								: deviceIdRaw !== undefined && deviceIdRaw !== null
+									? Number(deviceIdRaw)
+									: NaN;
+
+						let meshIndex: number | undefined;
+						if (!Number.isNaN(homeIdNum) && !Number.isNaN(deviceIdNum) && homeIdNum !== 0) {
+							const mod = deviceIdNum % homeIdNum;
+							meshIndex = (mod % 1000) + Math.floor(mod / 1000) * 256;
+						}
+
+						// Controller ID used by LAN packets (HA's switch_controller)
+						const switchController = d.switchID as number | undefined;
 
 						// Use deviceID first, then wifiMac (stripped), then a mesh-based fallback.
 						const id =
-							deviceID ??
+							deviceIdStr ??
 							(wifiMac ? wifiMac.replace(/:/g, '') : undefined) ??
 							`${mesh.id}-${productId ?? 'unknown'}`;
 
-						return {
+						// Mirror HA's home_devices[homeId][meshIndex] = deviceId
+						if (meshIndex !== undefined && deviceIdStr) {
+							while (homeDevices.length <= meshIndex) {
+								homeDevices.push('');
+							}
+							homeDevices[meshIndex] = deviceIdStr;
+						}
+
+						// Mirror HA's switchID_to_homeID + home_controllers
+						if (switchController !== undefined && Number.isFinite(switchController) && switchController > 0) {
+							if (!this.switchIdToHomeId[switchController]) {
+								this.switchIdToHomeId[switchController] = homeId;
+							}
+							if (!homeControllers.includes(switchController)) {
+								homeControllers.push(switchController);
+							}
+						}
+
+						devicesForMesh.push({
 							id,
 							name: displayName ?? undefined,
 							product_id: productId,
-							device_id: deviceID,
+							device_id: deviceIdStr,
 							mac: wifiMac,
+							mesh_id: meshIndex,
+							switch_controller: switchController,
 							raw: d,
-						};
-					});
+						});
+					}
+
+					// Attach per-mesh devices to the cloud config (what platform.ts already uses)
+					(mesh as Record<string, unknown>).devices = devicesForMesh;
+
+					// Persist per-home topology maps for TCP parsing later
+					if (homeDevices.length > 0) {
+						this.homeDevices[homeId] = homeDevices;
+					}
+					if (homeControllers.length > 0) {
+						this.homeControllers[homeId] = homeControllers;
+					}
+
+					// Maintain the legacy controller→device mapping for now so existing TCP code keeps working.
+					for (const dev of devicesForMesh) {
+						const record = dev as Record<string, unknown>;
+						const controllerId = record.switch_controller as number | undefined;
+
+						const deviceId =
+							(record.device_id as string | undefined) ??
+							(record.id as string | undefined);
+
+						if (controllerId !== undefined && deviceId) {
+							this.tcpClient.registerSwitchMapping(controllerId, deviceId);
+						}
+					}
 				} else {
 					this.log.info(
 						'CyncClient: mesh %s has no bulbsArray in properties; props keys=%o',
@@ -354,40 +531,37 @@ export class CyncClient {
 		return cfg;
 	}
 
-	/**
-	 * Start the LAN/TCP transport (stub for now).
-	 */
 	public async startTransport(
 		config: CyncCloudConfig,
 		loginCode: Uint8Array,
 	): Promise<void> {
 		this.ensureSession();
-		this.log.info('CyncClient: starting TCP transport (stub)…');
+		this.log.info('CyncClient: starting TCP transport…');
+
+		// Push current LAN topology (built in loadConfiguration) into the TCP client
+		const topology = this.getLanTopology();
+		this.tcpClient.applyLanTopology(topology);
+
+		// Optional: dump all frames as hex for debugging
+		this.tcpClient.onRawFrame((frame) => {
+			this.log.debug(
+				'[Cync TCP] raw frame (%d bytes): %s',
+				frame.byteLength,
+				frame.toString('hex'),
+			);
+		});
+
+		// REQUIRED: subscribe to parsed device updates
+		this.tcpClient.onDeviceUpdate((update) => {
+			if (this.lanUpdateHandler) {
+				this.lanUpdateHandler(update);
+			} else {
+				// Fallback: log only
+				this.log.info('[Cync TCP] device update callback fired; payload=%o', update);
+			}
+		});
 
 		await this.tcpClient.connect(loginCode, config);
-	}
-
-	public async stopTransport(): Promise<void> {
-		this.log.info('CyncClient: stopping TCP transport…');
-		await this.tcpClient.disconnect();
-	}
-
-	/**
-	 * High-level helper for toggling a switch/plug.
-	 */
-	public async setSwitchState(
-		deviceId: string,
-		params: { on: boolean; [key: string]: unknown },
-	): Promise<void> {
-		this.ensureSession();
-
-		this.log.debug(
-			'CyncClient: setSwitchState stub; deviceId=%s params=%o',
-			deviceId,
-			params,
-		);
-
-		await this.tcpClient.setSwitchState(deviceId, params);
 	}
 
 	public getSessionSnapshot(): CyncLoginSession | null {
@@ -396,6 +570,18 @@ export class CyncClient {
 
 	public getCloudConfigSnapshot(): CyncCloudConfig | null {
 		return this.cloudConfig;
+	}
+
+	public getLanTopology(): {
+		homeDevices: Record<string, string[]>;
+		homeControllers: Record<string, number[]>;
+		switchIdToHomeId: Record<number, string>;
+		} {
+		return {
+			homeDevices: this.homeDevices,
+			homeControllers: this.homeControllers,
+			switchIdToHomeId: this.switchIdToHomeId,
+		};
 	}
 
 	private ensureSession(): void {
