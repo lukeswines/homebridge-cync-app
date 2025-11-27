@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.1.2 – 2025-11-26
+
+### Fixes
+
+- Improve reliability when HomeKit scenes toggle multiple Cync plugs at once.
+- Serialize LAN power commands through a send queue so multiple `On.set` calls share a single TCP session instead of opening parallel connections.
+- Reuse an existing LAN socket for burst traffic and pace packets slightly to avoid race conditions with the Cync bridge.
+- Ensure per-device LAN updates are consistently received for both outlets after scene execution.
+
+### Internal
+
+- Add a queued send path to `TcpClient` with a `flushQueue()` helper that writes packets in order over one socket.
+- Guard `ensureConnected()` with a shared `connecting` promise so concurrent calls don’t race separate `establishSocket()` attempts.
+- Make the socket `close` handler only null out `this.socket` when it corresponds to the active instance (avoids stray listeners from older sockets).
+
+
 ## 0.1.0 – LAN Control Preview
 
 - Implemented TCP client for Cync LAN bridge using the cloud-provided login code.

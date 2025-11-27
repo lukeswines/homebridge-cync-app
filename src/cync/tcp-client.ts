@@ -14,6 +14,13 @@ const defaultLogger: CyncLogger = {
 export type DeviceUpdateCallback = (payload: unknown) => void;
 export type RawFrameListener = (frame: Buffer) => void;
 
+interface QueuedPowerPacket {
+	deviceId: string;
+	on: boolean;
+	seq: number;
+	packet: Buffer;
+}
+
 export class TcpClient {
 	public registerSwitchMapping(controllerId: number, deviceId: string): void {
 		if (!Number.isFinite(controllerId)) {
@@ -37,6 +44,9 @@ export class TcpClient {
 	private heartbeatTimer: NodeJS.Timeout | null = null;
 	private rawFrameListeners: RawFrameListener[] = [];
 	private controllerToDevice = new Map<number, string>();
+	private connecting: Promise<boolean> | null = null;
+	private readonly sendQueue: QueuedPowerPacket[] = [];
+	private sending = false;
 	private parseSwitchStateFrame(frame: Buffer): { controllerId: number; on: boolean; level: number } | null {
 		if (frame.length < 16) {
 			return null;
@@ -170,7 +180,8 @@ export class TcpClient {
 
 	/**
 	 * Ensure we have an open, logged-in socket.
-	 * If the socket is closed or missing, attempt to reconnect.
+	 * If multiple callers invoke this concurrently, they will share a single
+	 * connection attempt via `this.connecting`.
 	 */
 	private async ensureConnected(): Promise<boolean> {
 		if (this.socket && !this.socket.destroyed) {
@@ -184,8 +195,28 @@ export class TcpClient {
 			return false;
 		}
 
-		await this.establishSocket();
-		return !!(this.socket && !this.socket.destroyed);
+		if (!this.connecting) {
+			this.connecting = (async () => {
+				await this.establishSocket();
+				const ok = !!(this.socket && !this.socket.destroyed);
+				if (!ok) {
+					this.log.warn(
+						'[Cync TCP] establishSocket() completed but socket is not usable.',
+					);
+				}
+				this.connecting = null;
+				return ok;
+			})().catch((err) => {
+				this.log.error(
+					'[Cync TCP] ensureConnected() connect attempt failed: %s',
+					String(err),
+				);
+				this.connecting = null;
+				return false;
+			});
+		}
+
+		return this.connecting;
 	}
 
 	/**
@@ -294,6 +325,45 @@ export class TcpClient {
 		return this.seq;
 	}
 
+	private async flushQueue(): Promise<void> {
+		if (this.sending) {
+			return;
+		}
+		this.sending = true;
+
+		try {
+			while (this.sendQueue.length > 0) {
+				const item = this.sendQueue.shift();
+				if (!item) {
+					break;
+				}
+
+				const connected = await this.ensureConnected();
+				if (!connected || !this.socket || this.socket.destroyed) {
+					this.log.warn(
+						'[Cync TCP] Socket not available while flushing queue; dropping remaining %d packets.',
+						this.sendQueue.length + 1,
+					);
+					this.sendQueue.length = 0;
+					break;
+				}
+
+				this.socket.write(item.packet);
+				this.log.info(
+					'[Cync TCP] Sent power packet: device=%s on=%s seq=%d',
+					item.deviceId,
+					String(item.on),
+					item.seq,
+				);
+
+				// Small delay so we don't hammer the bridge/device with a burst
+				await new Promise((resolve) => setTimeout(resolve, 50));
+			}
+		} finally {
+			this.sending = false;
+		}
+	}
+
 	private buildPowerPacket(
 		controllerId: number,
 		meshId: number,
@@ -344,6 +414,9 @@ export class TcpClient {
 			this.socket.destroy();
 			this.socket = null;
 		}
+		this.sendQueue.length = 0;
+		this.sending = false;
+		this.connecting = null;
 	}
 
 	public onDeviceUpdate(cb: DeviceUpdateCallback): void {
@@ -369,7 +442,8 @@ export class TcpClient {
 
 	/**
 	 * High-level API to change switch state.
-	 * Ensures we have a live socket before sending.
+	 * Now enqueues a power packet so multiple HomeKit scene writes are
+	 * serialized over a single TCP session.
 	 */
 	public async setSwitchState(
 		deviceId: string,
@@ -377,14 +451,6 @@ export class TcpClient {
 	): Promise<void> {
 		if (!this.config) {
 			this.log.warn('[Cync TCP] No config available.');
-			return;
-		}
-
-		const connected = await this.ensureConnected();
-		if (!connected || !this.socket || this.socket.destroyed) {
-			this.log.warn(
-				'[Cync TCP] Cannot send, socket not ready even after reconnect attempt.',
-			);
 			return;
 		}
 
@@ -410,13 +476,15 @@ export class TcpClient {
 		const seq = this.nextSeq();
 		const packet = this.buildPowerPacket(controllerId, meshIndex, params.on, seq);
 
-		this.socket.write(packet);
-		this.log.info(
-			'[Cync TCP] Sent power packet: device=%s on=%s seq=%d',
+		this.sendQueue.push({
 			deviceId,
-			String(params.on),
+			on: params.on,
 			seq,
-		);
+			packet,
+		});
+
+		// Async fire-and-forget; actual sends are serialized in flushQueue()
+		void this.flushQueue();
 	}
 
 	private findDevice(deviceId: string) {
@@ -447,7 +515,9 @@ export class TcpClient {
 
 		socket.on('close', () => {
 			this.log.warn('[Cync TCP] Socket closed.');
-			this.socket = null;
+			if (this.socket === socket) {
+				this.socket = null;
+			}
 		});
 
 		socket.on('error', (err) => {
