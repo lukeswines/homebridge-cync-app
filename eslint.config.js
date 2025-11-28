@@ -3,7 +3,11 @@ import tseslint from 'typescript-eslint';
 
 export default tseslint.config(
 	{
-		ignores: ['dist/**'],
+		ignores: [
+			'dist/**',
+			'node_modules/**',
+			'homebridge-ui/server.js',
+		],
 	},
 	{
 		rules: {

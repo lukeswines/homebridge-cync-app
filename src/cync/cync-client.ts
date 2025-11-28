@@ -191,6 +191,10 @@ export class CyncClient {
 		this.applyAccessToken(tokenData);
 
 		this.log.info('Cync login successful; userId=%s (token stored)', tokenData.userId);
+		this.log.info(
+			'Cync: 2FA login complete and a token has been stored. You may now clear the "twoFactor" code from the plugin config; ' +
+					'it will only be needed again if the stored token expires or is removed.',
+		);
 		return true;
 	}
 

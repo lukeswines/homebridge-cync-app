@@ -13,12 +13,17 @@ export interface CyncTokenData {
 
 /**
  * Simple JSON token store under the Homebridge storage path.
+ *
+ * Files are stored at:
+ *   <storagePath>/homebridge-cync-app/cync-tokens.json
  */
 export class CyncTokenStore {
+	private readonly dirPath: string;
 	private readonly filePath: string;
 
 	public constructor(storagePath: string) {
-		this.filePath = path.join(storagePath, 'cync-tokens.json');
+		this.dirPath = path.join(storagePath, 'homebridge-cync-app');
+		this.filePath = path.join(this.dirPath, 'cync-tokens.json');
 	}
 
 	public async load(): Promise<CyncTokenData | null> {
@@ -33,12 +38,16 @@ export class CyncTokenStore {
 
 			return data;
 		} catch {
+			// file missing or unreadable → treat as no token
 			return null;
 		}
 	}
 
 	public async save(data: CyncTokenData): Promise<void> {
 		const json = JSON.stringify(data, null, 2);
+
+		// Ensure directory exists before writing
+		await fs.mkdir(this.dirPath, { recursive: true });
 		await fs.writeFile(this.filePath, json, 'utf8');
 	}
 
@@ -46,7 +55,7 @@ export class CyncTokenStore {
 		try {
 			await fs.unlink(this.filePath);
 		} catch {
-			// ignore if missing
+			// ignore if missing or already removed
 		}
 	}
 }

@@ -1,5 +1,26 @@
 # Changelog
 
+## v0.1.3
+
+**Release Date:** 2025-11-28
+
+### Added
+
+- Integrated a custom Homebridge UI configuration panel for Cync login.
+- Added a single-flow login experience: enter email/password and 2FA code in one place via the UI instead of multiple save/restart cycles.
+
+### Changed
+
+- Simplified initial setup: configuration now only requires one Homebridge restart after entering credentials and completing 2FA.
+- Updated the Cync client/session setup flow to work with the new UI-driven login and token handling.
+- Refined configuration handling so the plugin can go from “installed” to “discovering devices” with fewer manual steps.
+- Moved storage directory under `homebridge-cync-app`.  If you installed a previous version, you may want to clean up the token that was stored in the root directory.
+
+### Fixed
+
+- Updated ESLint flat configuration to work with ESLint 9, including ignoring `homebridge-ui/server.js` while keeping plugin TypeScript linting intact.
+- General tooling/housekeeping improvements to keep `npm run lint` and `npm run build` clean on current Node and Homebridge versions.
+
 ## 0.1.2 – 2025-11-26
 
 ### Fixes

@@ -1,7 +1,8 @@
 {
 	"pluginAlias": "CyncAppPlatform",
 	"pluginType": "platform",
-
+	"singular": true,
+	"customUi": true,
 	"schema": {
 		"type": "object",
 		"properties": {
@@ -15,19 +16,24 @@
 				"title": "Cync Email",
 				"type": "string",
 				"format": "email",
+				"required": true,
+				"default": "",
 				"description": "Email address you use to sign in to the Cync app."
 			},
 			"password": {
 				"title": "Cync Password",
 				"type": "string",
 				"format": "password",
+				"required": true,
+				"default": "",
 				"description": "Password for your Cync account."
 			},
 			"twoFactor": {
 				"title": "Two-Factor Code (OTP)",
 				"type": "string",
 				"pattern": "^[0-9]{6}$",
-				"description": "Temporary 6-digit code emailed by Cync when you sign in. Leave blank normally; only needed when performing a fresh login."
+				"default": "",
+				"description": "Temporary 6-digit code emailed by Cync when you sign in."
 			}
 		},
 		"required": [

@@ -2,7 +2,7 @@
 	"name": "homebridge-cync-app",
 	"displayName": "Homebridge Cync App",
 	"type": "module",
-	"version": "0.1.2",
+	"version": "0.1.3",
 	"private": false,
 	"description": "Homebridge plugin that integrates your GE Cync account (via the Cync app/API) and exposes all supported devices: plugs, lights, switches, etc",
 	"author": "Dustin Newell",
@@ -28,7 +28,7 @@
 	],
 	"main": "dist/index.js",
 	"publishConfig": {
-	  "access": "public"
+		"access": "public"
 	},
 	"homebridge": {
 		"pluginType": "platform",
@@ -45,7 +45,9 @@
 		"watch": "npm run build && npm link && nodemon"
 	},
 	"dependencies": {
-		"homebridge-lib": "^7.1.12"
+		"homebridge-lib": "^7.1.12",
+		"node-fetch": "^3.3.2",
+		"@homebridge/plugin-ui-utils": "^1.0.0"
 	},
 	"devDependencies": {
 		"@eslint/js": "^9.39.1",

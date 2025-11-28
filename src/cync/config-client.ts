@@ -8,7 +8,6 @@
 const CYNC_API_BASE = 'https://api.gelighting.com/v2/';
 const CORP_ID = '1007d2ad150c4000';
 
-// Minimal fetch/response typing for Node 18+, without depending on DOM lib types.
 type FetchLike = (input: unknown, init?: unknown) => Promise<unknown>;
 
 declare const fetch: FetchLike;
@@ -65,10 +64,7 @@ export interface CyncCloudConfig {
 	meshes: CyncDeviceMesh[];
 }
 
-/**
- * Very small logger interface so we can accept either the Homebridge log
- * object or console.* functions in tests.
- */
+
 export interface CyncLogger {
 	debug(message: string, ...args: unknown[]): void;
 	info(message: string, ...args: unknown[]): void;
@@ -151,7 +147,6 @@ export class ConfigClient {
 			email,
 			password,
 			two_factor: otpCode,
-			// Matches the reference implementations: random 16-char string.
 			resource: ConfigClient.randomLoginResource(),
 		};
 

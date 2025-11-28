@@ -1,0 +1,121 @@
+<!-- homebridge-ui/public/index.html -->
+<div class="text-center mb-3">
+	<img
+		src="icon.png"
+		alt="Cync App Icon"
+		style="width: 96px; height: 96px; border-radius: 5px;"
+	/>
+</div>
+<div class="card card-body">
+  <div id="options" class="card-body my-3 w-75 mx-auto">
+    <div class="alert alert-warning" role="alert">
+		It is recommended to create a second Cync account and share your home
+		between accounts to avoid issues with Cync servers and the official Cync App.
+    </div>
+
+    <form id="authForm" class="form-horizontal">
+      <div id="codeDiv" class="card-body my-3 w-75 mx-auto">
+        <div class="mb-3">
+          <label class="form-label" for="emailAddress">Cync Email Address</label>
+          <input class="form-control" type="email" id="emailAddress" placeholder="name@example.com" />
+        </div>
+
+        <button type="button" class="btn btn-secondary text-center" id="requestCode">
+          Request 2FA Code
+        </button>
+      </div>
+
+      <div id="authDiv" class="card-body my-3 w-75 mx-auto">
+        <div class="mb-3">
+          <label class="form-label" for="password">Cync Password</label>
+          <input class="form-control" type="password" id="password" />
+        </div>
+
+        <div class="mb-3">
+          <label class="form-label" for="mfaCode">2FA Code</label>
+          <input class="form-control" type="text" id="mfaCode" />
+        </div>
+
+        <button type="button" class="btn btn-primary text-center" id="login">
+          Login
+        </button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<script>
+  homebridge.addEventListener('ready', async () => {
+    const pluginConfig = await homebridge.getPluginConfig();
+
+    if (pluginConfig[0]) {
+      const cfg = pluginConfig[0];
+      document.getElementById('emailAddress').value =
+        cfg.username || cfg.email || '';
+    }
+
+    document
+      .getElementById('requestCode')
+      .addEventListener('click', () => {
+        document.getElementById('mfaCode').value = '';
+
+        const emailAddress =
+          document.getElementById('emailAddress').value || '';
+        if (!emailAddress) {
+          homebridge.toast.error('Please enter your Cync email address.');
+          return;
+        }
+
+        homebridge
+          .request('/requestCode', { emailAddress })
+          .then(() => {
+            homebridge.toast.info(
+              `Please check your ${emailAddress} inbox for your 2FA code.`,
+            );
+          })
+          .catch((err) => {
+            homebridge.toast.error(
+              `Failed to request 2FA code: ${String(err)}`,
+            );
+          });
+      });
+
+    document.getElementById('login').addEventListener('click', () => {
+      const payload = {
+        emailAddress: document.getElementById('emailAddress').value || '',
+        password: document.getElementById('password').value || '',
+        mfaCode: document.getElementById('mfaCode').value || '',
+      };
+
+      if (!payload.emailAddress || !payload.password || !payload.mfaCode) {
+        homebridge.toast.error(
+          'Please enter email, password, and 2FA code.',
+        );
+        return;
+      }
+
+      homebridge
+        .request('/login', payload)
+        .then(async (config) => {
+          if (config && config.error) {
+            homebridge.toast.error(config.error);
+            document.getElementById('password').value = '';
+            document.getElementById('mfaCode').value = '';
+            return;
+          }
+
+          await homebridge.updatePluginConfig([config]);
+          homebridge.toast.success(
+            'You have successfully authenticated with Cync!',
+          );
+          await homebridge.savePluginConfig();
+          homebridge.closeSettings();
+        })
+        .catch((err) => {
+          homebridge.toast.error(
+            `Login failed: ${String(err)}`,
+          );
+        });
+    });
+  });
+</script>
