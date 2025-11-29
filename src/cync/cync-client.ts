@@ -41,9 +41,6 @@ export class CyncClient {
 	private homeControllers: Record<string, number[]> = {};
 	private switchIdToHomeId: Record<number, string> = {};
 
-	// Credentials from config.json, used to drive 2FA bootstrap.
-	private readonly loginConfig: { email: string; password: string; twoFactor?: string };
-
 	// Optional LAN update hook for the platform
 	private lanUpdateHandler: ((update: unknown) => void) | null = null;
 
@@ -70,7 +67,6 @@ export class CyncClient {
 	constructor(
 		configClient: ConfigClient,
 		tcpClient: TcpClient,
-		loginConfig: { email: string; password: string; twoFactor?: string },
 		storagePath: string,
 		logger?: CyncLogger,
 	) {
@@ -78,7 +74,6 @@ export class CyncClient {
 		this.tcpClient = tcpClient;
 		this.log = logger ?? defaultLogger;
 
-		this.loginConfig = loginConfig;
 		this.tokenStore = new CyncTokenStore(storagePath);
 	}
 	// ### 🧩 LAN Login Code Builder
@@ -114,90 +109,33 @@ export class CyncClient {
 		 * 2) If none/invalid, run 2FA flow (request or complete).
 		 * Returns true on successful login, false if we need user input (2FA).
 		 */
+	/**
+	 * Ensure we are logged in using a stored token only.
+	 *
+	 * UI (homebridge-ui) is responsible for performing 2FA and writing
+	 * <storagePath>/homebridge-cync-app/cync-tokens.json.
+	 *
+	 * Returns true if a valid token was loaded and applied, false otherwise.
+	 */
 	public async ensureLoggedIn(): Promise<boolean> {
-		// 1) Try stored token/session
 		const stored = await this.tokenStore.load();
-		if (stored) {
-			this.log.info(
-				'CyncClient: using stored token for userId=%s (expiresAt=%s)',
-				stored.userId,
-				stored.expiresAt ? new Date(stored.expiresAt).toISOString() : 'unknown',
-			);
-
-			this.tokenData = stored;
-
-			// Hydrate ConfigClient + session snapshot.
-			this.applyAccessToken(stored);
-
-			return true;
-		}
-
-		// 2) No stored token – run 2FA bootstrap
-		const { email, password, twoFactor } = this.loginConfig;
-
-		if (!email || !password) {
-			this.log.error('CyncClient: email and password are required to obtain a new token.');
-			return false;
-		}
-
-		if (!twoFactor || String(twoFactor).trim() === '') {
-			// No 2FA code – request one
-			this.log.info('Cync: starting 2FA handshake for %s', email);
-			await this.requestTwoFactorCode(email);
-			this.log.info(
-				'Cync: 2FA code sent to your email. Enter the code as "twoFactor" in the plugin config and restart Homebridge to complete login.',
+		if (!stored) {
+			this.log.error(
+				'CyncClient: no stored token found; complete login from the Homebridge UI first.',
 			);
 			return false;
 		}
 
-		// We have a 2FA code – complete login and persist token
-		this.log.info('Cync: completing 2FA login for %s', email);
-		const loginResult = await this.completeTwoFactorLogin(
-			email,
-			password,
-			String(twoFactor).trim(),
-		);
-
-		// Build LAN login code
-		let authorize: string | undefined;
-		let lanLoginCode: string | undefined;
-
-		const raw = loginResult.raw as Record<string, unknown>;
-		if (typeof raw.authorize === 'string') {
-			authorize = raw.authorize;
-
-			const lanBlob = this.buildLanLoginCode(authorize, Number(loginResult.userId));
-			lanLoginCode = Buffer.from(lanBlob).toString('base64');
-		} else {
-			this.log.warn(
-				'CyncClient: login response missing "authorize"; LAN login will be disabled.',
-			);
-		}
-
-		const tokenData: CyncTokenData = {
-			userId: String(loginResult.userId),
-			accessToken: loginResult.accessToken,
-			refreshToken: loginResult.refreshToken,
-			expiresAt: loginResult.expiresAt ?? undefined,
-
-			authorize,
-			lanLoginCode,
-		};
-
-		await this.tokenStore.save(tokenData);
-		this.tokenData = tokenData;
-
-		// Hydrate ConfigClient + session snapshot from the freshly obtained token.
-		this.applyAccessToken(tokenData);
-
-		this.log.info('Cync login successful; userId=%s (token stored)', tokenData.userId);
 		this.log.info(
-			'Cync: 2FA login complete and a token has been stored. You may now clear the "twoFactor" code from the plugin config; ' +
-					'it will only be needed again if the stored token expires or is removed.',
+			'CyncClient: using stored token for userId=%s (expiresAt=%s)',
+			stored.userId,
+			stored.expiresAt ? new Date(stored.expiresAt).toISOString() : 'unknown',
 		);
+
+		this.tokenData = stored;
+		this.applyAccessToken(stored);
 		return true;
 	}
-
 
 	/**
 		 * Internal helper: request a 2FA email code using existing authenticate().

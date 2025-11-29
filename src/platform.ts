@@ -164,26 +164,16 @@ export class CyncAppPlatform implements DynamicPlatformPlugin {
 		this.config = config;
 		this.api = api;
 
-		// Extract login config from platform config
-		const cfg = this.config as Record<string, unknown>;
-		const username = (cfg.username ?? cfg.email) as string | undefined;
-		const password = cfg.password as string | undefined;
-		const twoFactor = cfg.twoFactor as string | undefined;
-
 		const cyncLogger = toCyncLogger(this.log);
 		const tcpClient = new TcpClient(cyncLogger);
 
 		this.client = new CyncClient(
 			new ConfigClient(cyncLogger),
 			tcpClient,
-			{
-				email: username ?? '',
-				password: password ?? '',
-				twoFactor,
-			},
 			this.api.user.storagePath(),
 			cyncLogger,
 		);
+
 
 		this.tcpClient = tcpClient;
 
@@ -210,21 +200,11 @@ export class CyncAppPlatform implements DynamicPlatformPlugin {
 
 	private async loadCync(): Promise<void> {
 		try {
-			const cfg = this.config as Record<string, unknown>;
-			const username = (cfg.username ?? cfg.email) as string | undefined;
-			const password = cfg.password as string | undefined;
-
-			if (!username || !password) {
-				this.log.warn('Cync: credentials missing in config.json; skipping cloud login.');
-				return;
-			}
-
-			// Let CyncClient handle 2FA bootstrap + token persistence.
 			const loggedIn = await this.client.ensureLoggedIn();
 			if (!loggedIn) {
-				// We either just requested a 2FA code or hit a credential error.
-				// In the "code requested" case, the log already tells the user
-				// to add it to config and restart.
+				this.log.warn(
+					'Cync: no stored Cync token; complete login from the Homebridge UI, then restart Homebridge.',
+				);
 				return;
 			}
 
