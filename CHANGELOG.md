@@ -1,41 +1,32 @@
 # Changelog
 
-## v0.1.3
+## v0.1.5 – Custom 2FA UI & Token Locking
+**Release Date:** 2025-11-29
+
+- Added a custom Homebridge UI for Cync login:
+  - Email, password, and verification code (OTP) now live in a single guided flow.
+  - “Request Verification Code” button triggers the Cync 2FA email from the settings UI.
+- Implemented a Homebridge UI server:
+  - `/request-otp` endpoint uses the existing `ConfigClient.sendTwoFactorCode()` flow.
+  - `/status` endpoint reports whether a stored token exists.
+  - `/sign-out` endpoint clears the stored token file.
+- Token-aware UI behavior:
+  - When a valid token exists, credential and OTP fields are disabled to prevent accidental edits.
+  - “Sign Out” clears the token, blanks credentials, and unlocks the form.
+- Fixed 2FA variable drift:
+  - Standardised on `username`, `password`, and `twoFactor` in config and UI.
+  - Ensured `CyncClient.ensureLoggedIn()` correctly picks up `twoFactor` and writes `cync-tokens.json`.
+- General cleanup:
+  - Removed redundant client-side save button; now using the Homebridge “Save” button for persistence.
+  - Minor logging and UI text improvements.
+
+## v0.1.4 – “Rollback to sanity”
 
 **Release Date:** 2025-11-28
 
-### Added
-
-- Integrated a custom Homebridge UI configuration panel for Cync login.
-- Added a single-flow login experience: enter email/password and 2FA code in one place via the UI instead of multiple save/restart cycles.
-
-### Changed
-
-- Simplified initial setup: configuration now only requires one Homebridge restart after entering credentials and completing 2FA.
-- Updated the Cync client/session setup flow to work with the new UI-driven login and token handling.
-- Refined configuration handling so the plugin can go from “installed” to “discovering devices” with fewer manual steps.
-- Moved storage directory under `homebridge-cync-app`.  If you installed a previous version, you may want to clean up the token that was stored in the root directory.
-
-### Fixed
-
-- Updated ESLint flat configuration to work with ESLint 9, including ignoring `homebridge-ui/server.js` while keeping plugin TypeScript linting intact.
-- General tooling/housekeeping improvements to keep `npm run lint` and `npm run build` clean on current Node and Homebridge versions.
-
-## 0.1.2 – 2025-11-26
-
-### Fixes
-
-- Improve reliability when HomeKit scenes toggle multiple Cync plugs at once.
-- Serialize LAN power commands through a send queue so multiple `On.set` calls share a single TCP session instead of opening parallel connections.
-- Reuse an existing LAN socket for burst traffic and pace packets slightly to avoid race conditions with the Cync bridge.
-- Ensure per-device LAN updates are consistently received for both outlets after scene execution.
-
-### Internal
-
-- Add a queued send path to `TcpClient` with a `flushQueue()` helper that writes packets in order over one socket.
-- Guard `ensureConnected()` with a shared `connecting` promise so concurrent calls don’t race separate `establishSocket()` attempts.
-- Make the socket `close` handler only null out `this.socket` when it corresponds to the active instance (avoids stray listeners from older sockets).
-
+- Reset codebase to v0.1.0 (last known good 2FA behavior).
+- Reintroduced LAN command serialization (fixes issues with multiple commands at once).
+- Marked v0.1.3 as experimental/dead branch.
 
 ## 0.1.0 – LAN Control Preview
 
