@@ -42,7 +42,12 @@ export class CyncClient {
 	private switchIdToHomeId: Record<number, string> = {};
 
 	// Credentials from config.json, used to drive 2FA bootstrap.
-	private readonly loginConfig: { email: string; password: string; twoFactor?: string };
+	//
+	// Canonical keys (must match platform + config):
+	//   - username: login identifier (email address used in Cync app)
+	//   - password: account password
+	//   - twoFactor: 6-digit OTP, optional; when present we complete 2FA on restart.
+	private readonly loginConfig: { username: string; password: string; twoFactor?: string };
 
 	// Optional LAN update hook for the platform
 	private lanUpdateHandler: ((update: unknown) => void) | null = null;
@@ -70,7 +75,7 @@ export class CyncClient {
 	constructor(
 		configClient: ConfigClient,
 		tcpClient: TcpClient,
-		loginConfig: { email: string; password: string; twoFactor?: string },
+		loginConfig: { username: string; password: string; twoFactor?: string },
 		storagePath: string,
 		logger?: CyncLogger,
 	) {
@@ -80,7 +85,18 @@ export class CyncClient {
 
 		this.loginConfig = loginConfig;
 		this.tokenStore = new CyncTokenStore(storagePath);
+
+		// One-time sanity log so we can see exactly what was passed in from platform/config.
+		this.log.debug(
+			'CyncClient: constructed with loginConfig=%o',
+			{
+				username: loginConfig.username,
+				hasPassword: !!loginConfig.password,
+				twoFactor: loginConfig.twoFactor,
+			},
+		);
 	}
+
 	// ### 🧩 LAN Login Code Builder
 	private buildLanLoginCode(authorize: string, userId: number): Uint8Array {
 		const authorizeBytes = Buffer.from(authorize, 'ascii');
@@ -133,17 +149,20 @@ export class CyncClient {
 		}
 
 		// 2) No stored token – run 2FA bootstrap
-		const { email, password, twoFactor } = this.loginConfig;
+		const { username, password, twoFactor } = this.loginConfig;
 
-		if (!email || !password) {
-			this.log.error('CyncClient: email and password are required to obtain a new token.');
+		if (!username || !password) {
+			this.log.error('CyncClient: username and password are required to obtain a new token.');
 			return false;
 		}
 
-		if (!twoFactor || String(twoFactor).trim() === '') {
+		const trimmedCode = typeof twoFactor === 'string' ? twoFactor.trim() : '';
+		const hasTwoFactor = trimmedCode.length > 0;
+
+		if (!hasTwoFactor) {
 			// No 2FA code – request one
-			this.log.info('Cync: starting 2FA handshake for %s', email);
-			await this.requestTwoFactorCode(email);
+			this.log.info('Cync: starting 2FA handshake for %s', username);
+			await this.requestTwoFactorCode(username);
 			this.log.info(
 				'Cync: 2FA code sent to your email. Enter the code as "twoFactor" in the plugin config and restart Homebridge to complete login.',
 			);
@@ -151,11 +170,11 @@ export class CyncClient {
 		}
 
 		// We have a 2FA code – complete login and persist token
-		this.log.info('Cync: completing 2FA login for %s', email);
+		this.log.info('Cync: completing 2FA login for %s', username);
 		const loginResult = await this.completeTwoFactorLogin(
-			email,
+			username,
 			password,
-			String(twoFactor).trim(),
+			trimmedCode,
 		);
 
 		// Build LAN login code
@@ -196,16 +215,17 @@ export class CyncClient {
 
 
 	/**
-		 * Internal helper: request a 2FA email code using existing authenticate().
-		 */
-	private async requestTwoFactorCode(email: string): Promise<void> {
-		await this.authenticate(email);
+	 * Internal helper: request a 2FA email code using existing authenticate().
+	 * Accepts the same username value we store in loginConfig (email address for Cync).
+	 */
+	private async requestTwoFactorCode(username: string): Promise<void> {
+		await this.authenticate(username);
 	}
 
 	/**
-		 * Internal helper: complete 2FA login using existing submitTwoFactor().
-		 * This converts CyncLoginSession into the richer shape we want for token storage.
-		 */
+	 * Internal helper: complete 2FA login using existing submitTwoFactor().
+	 * This converts CyncLoginSession into the richer shape we want for token storage.
+	 */
 	private async completeTwoFactorLogin(
 		email: string,
 		password: string,
@@ -218,12 +238,15 @@ export class CyncClient {
 		}
 	> {
 		const session = await this.submitTwoFactor(email, password, code);
+
 		// Extract authorize field from session.raw (Cync returns it)
 		const raw = session.raw as Record<string, unknown>;
 		const authorize = typeof raw?.authorize === 'string' ? raw.authorize : undefined;
 
 		if (!authorize) {
-			throw new Error('CyncClient: missing "authorize" field from login response; LAN login cannot be generated.');
+			throw new Error(
+				'CyncClient: missing "authorize" field from login response; LAN login cannot be generated.',
+			);
 		}
 
 		const s = session as unknown as SessionWithPossibleTokens;
@@ -316,11 +339,11 @@ export class CyncClient {
 	 * in the same process, so it works across Homebridge restarts.
 	 */
 	public async submitTwoFactor(
-		email: string,
+		username: string,
 		password: string,
 		code: string,
 	): Promise<CyncLoginSession> {
-		const trimmedEmail = email.trim();
+		const trimmedEmail = username.trim();
 		const trimmedCode = code.trim();
 
 		this.log.info('CyncClient: completing 2FA login for %s', trimmedEmail);
@@ -346,7 +369,6 @@ export class CyncClient {
 
 		return session;
 	}
-
 
 	/**
 	 * Fetch and cache the cloud configuration (meshes/devices) for the logged-in user.

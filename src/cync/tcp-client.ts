@@ -21,6 +21,7 @@ export class TcpClient {
 		}
 		this.controllerToDevice.set(controllerId, deviceId);
 	}
+	private commandChain: Promise<void> = Promise.resolve();
 	private homeDevices: Record<string, string[]> = {};
 	private switchIdToHomeId = new Map<number, string>();
 	private readonly log: CyncLogger;
@@ -37,6 +38,38 @@ export class TcpClient {
 	private heartbeatTimer: NodeJS.Timeout | null = null;
 	private rawFrameListeners: RawFrameListener[] = [];
 	private controllerToDevice = new Map<number, string>();
+	/**
+	 * ### 🧩 LAN Command Serializer: Ensures TCP commands are sent one at a time
+	 *
+	 * Wraps any TCP command in a promise chain so commands are serialized
+	 * and cannot be written to the socket concurrently.
+	 */
+	private enqueueCommand<T>(fn: () => Promise<T>): Promise<T> {
+		let resolveWrapper: (value: T | PromiseLike<T>) => void;
+		let rejectWrapper: (reason?: unknown) => void;
+
+		const p = new Promise<T>((resolve, reject) => {
+			resolveWrapper = resolve;
+			rejectWrapper = reject;
+		});
+
+		// Chain onto the existing promise
+		this.commandChain = this.commandChain
+			.then(async () => {
+				try {
+					const result = await fn();
+					resolveWrapper(result);
+				} catch (err) {
+					rejectWrapper(err);
+				}
+			})
+			.catch(() => {
+				// Swallow errors in the chain so a failed command
+				// doesn't permanently block the queue.
+			});
+
+		return p;
+	}
 	private parseSwitchStateFrame(frame: Buffer): { controllerId: number; on: boolean; level: number } | null {
 		if (frame.length < 16) {
 			return null;
@@ -369,54 +402,58 @@ export class TcpClient {
 
 	/**
 	 * High-level API to change switch state.
-	 * Ensures we have a live socket before sending.
+	 * Ensures we have a live socket before sending and serializes commands.
 	 */
 	public async setSwitchState(
 		deviceId: string,
 		params: { on: boolean },
 	): Promise<void> {
-		if (!this.config) {
-			this.log.warn('[Cync TCP] No config available.');
-			return;
-		}
+		return this.enqueueCommand(async () => {
+			if (!this.config) {
+				this.log.warn('[Cync TCP] No config available.');
+				return;
+			}
 
-		const connected = await this.ensureConnected();
-		if (!connected || !this.socket || this.socket.destroyed) {
-			this.log.warn(
-				'[Cync TCP] Cannot send, socket not ready even after reconnect attempt.',
-			);
-			return;
-		}
+			const connected = await this.ensureConnected();
+			if (!connected || !this.socket || this.socket.destroyed) {
+				this.log.warn(
+					'[Cync TCP] Cannot send, socket not ready even after reconnect attempt.',
+				);
+				return;
+			}
 
-		const device = this.findDevice(deviceId);
-		if (!device) {
-			this.log.warn('[Cync TCP] Unknown deviceId=%s', deviceId);
-			return;
-		}
+			const device = this.findDevice(deviceId);
+			if (!device) {
+				this.log.warn('[Cync TCP] Unknown deviceId=%s', deviceId);
+				return;
+			}
 
-		const controllerId = Number((device as Record<string, unknown>).switch_controller);
-		const meshIndex = Number((device as Record<string, unknown>).mesh_id);
+			const record = device as Record<string, unknown>;
+			const controllerId = Number(record.switch_controller);
+			const meshIndex = Number(record.mesh_id);
 
-		if (!Number.isFinite(controllerId) || !Number.isFinite(meshIndex)) {
-			this.log.warn(
-				'[Cync TCP] Device %s is missing LAN fields (switch_controller=%o mesh_id=%o)',
+			if (!Number.isFinite(controllerId) || !Number.isFinite(meshIndex)) {
+				this.log.warn(
+					'[Cync TCP] Device %s is missing LAN fields (switch_controller=%o mesh_id=%o)',
+					deviceId,
+					record.switch_controller,
+					record.mesh_id,
+				);
+				return;
+			}
+
+			const seq = this.nextSeq();
+			const packet = this.buildPowerPacket(controllerId, meshIndex, params.on, seq);
+
+			// At this point socket has been validated above
+			this.socket.write(packet);
+			this.log.info(
+				'[Cync TCP] Sent power packet: device=%s on=%s seq=%d',
 				deviceId,
-				(device as Record<string, unknown>).switch_controller,
-				(device as Record<string, unknown>).mesh_id,
+				String(params.on),
+				seq,
 			);
-			return;
-		}
-
-		const seq = this.nextSeq();
-		const packet = this.buildPowerPacket(controllerId, meshIndex, params.on, seq);
-
-		this.socket.write(packet);
-		this.log.info(
-			'[Cync TCP] Sent power packet: device=%s on=%s seq=%d',
-			deviceId,
-			String(params.on),
-			seq,
-		);
+		});
 	}
 
 	private findDevice(deviceId: string) {

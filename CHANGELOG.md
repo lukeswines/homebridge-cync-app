@@ -1,5 +1,33 @@
 # Changelog
 
+## v0.1.5 – Custom 2FA UI & Token Locking
+**Release Date:** 2025-11-29
+
+- Added a custom Homebridge UI for Cync login:
+  - Email, password, and verification code (OTP) now live in a single guided flow.
+  - “Request Verification Code” button triggers the Cync 2FA email from the settings UI.
+- Implemented a Homebridge UI server:
+  - `/request-otp` endpoint uses the existing `ConfigClient.sendTwoFactorCode()` flow.
+  - `/status` endpoint reports whether a stored token exists.
+  - `/sign-out` endpoint clears the stored token file.
+- Token-aware UI behavior:
+  - When a valid token exists, credential and OTP fields are disabled to prevent accidental edits.
+  - “Sign Out” clears the token, blanks credentials, and unlocks the form.
+- Fixed 2FA variable drift:
+  - Standardised on `username`, `password`, and `twoFactor` in config and UI.
+  - Ensured `CyncClient.ensureLoggedIn()` correctly picks up `twoFactor` and writes `cync-tokens.json`.
+- General cleanup:
+  - Removed redundant client-side save button; now using the Homebridge “Save” button for persistence.
+  - Minor logging and UI text improvements.
+
+## v0.1.4 – “Rollback to sanity”
+
+**Release Date:** 2025-11-28
+
+- Reset codebase to v0.1.0 (last known good 2FA behavior).
+- Reintroduced LAN command serialization (fixes issues with multiple commands at once).
+- Marked v0.1.3 as experimental/dead branch.
+
 ## 0.1.0 – LAN Control Preview
 
 - Implemented TCP client for Cync LAN bridge using the cloud-provided login code.

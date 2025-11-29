@@ -36,26 +36,18 @@ Add a platform entry to your Homebridge `config.json`:
   ]
 }
 ```
-### 2FA flow
+## Cync Login / 2FA Flow
 
-1. Start with no twoFactor field (or leave it empty).
+1. Open the plugin settings in Homebridge UI.
+2. Enter your Cync **Email** and **Password**.
+3. Click **Request Verification Code**.
+4. Check your email for the 6-digit Cync verification code.
+5. Enter the code in **Verification Code (OTP)**.
+6. Click the Homebridge **Save** button.
+7. Restart Homebridge.
 
-2. Start Homebridge:
-- The plugin asks Cync to send a 2FA code to your email.
-- In the log you’ll see:
-  - Cync: starting 2FA handshake for ...
-  - Cync: 2FA code sent to your email...
-
-3. Copy the code from your email.
-
-4. Add "twoFactor": "123456" (replace with your real code) to the plugin config and restart Homebridge.
-
-5. On successful login:
-- The plugin stores an access token in the Homebridge storage path.
-- On future restarts, it logs:
-  - CyncClient: using stored token for userId=...
-  - Cync: restored session from stored token; userId=...
-- No further 2FA input is needed unless the token expires or is revoked.
+On successful login, a token will be stored in `cync-tokens.json` under the Homebridge storage path.
+While a valid token exists, the login fields are locked. Click **Sign Out** in the plugin UI to clear the token and re-enter credentials.
 
 ## Project Status & Roadmap
 - **0.0.1** – Initial scaffold, basic Homebridge platform, config wiring, and logging.
@@ -67,4 +59,6 @@ Add a platform entry to your Homebridge `config.json`:
 - HomeKit can now control Cync smart plugs directly over the Cync LAN bridge.
 - Switch states update independently and stay in sync between the Cync app and HomeKit.
 - Cloud config is still used for login + topology, but ongoing control is via TCP.
-
+- **0.1.1 - 0.1.3** - Failed experiment to incorporate custom UI.
+- **0.1.4** - Codebase restored to v0.1.0
+- **0.1.5** - Successful Custom UI implementation, improved 2FA login flow.

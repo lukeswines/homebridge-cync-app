@@ -41,7 +41,10 @@ interface CyncAccessoryContext {
  */
 export class CyncAppPlatform implements DynamicPlatformPlugin {
 	public readonly accessories: PlatformAccessory[] = [];
-
+	public configureAccessory(accessory: PlatformAccessory): void {
+		this.log.info('Restoring cached accessory', accessory.displayName);
+		this.accessories.push(accessory);
+	}
 	private readonly log: Logger;
 	private readonly api: API;
 	private readonly config: PlatformConfig;
@@ -165,10 +168,26 @@ export class CyncAppPlatform implements DynamicPlatformPlugin {
 		this.api = api;
 
 		// Extract login config from platform config
-		const cfg = this.config as Record<string, unknown>;
-		const username = (cfg.username ?? cfg.email) as string | undefined;
-		const password = cfg.password as string | undefined;
-		const twoFactor = cfg.twoFactor as string | undefined;
+		const raw = this.config as Record<string, unknown>;
+
+		// Canonical config keys: username, password, twoFactor
+		// Accept legacy "email" as a fallback source for username, but do not write it back.
+		const username =
+			typeof raw.username === 'string'
+				? raw.username
+				: typeof raw.email === 'string'
+					? raw.email
+					: '';
+
+		const password =
+			typeof raw.password === 'string'
+				? raw.password
+				: '';
+
+		const twoFactor =
+			typeof raw.twoFactor === 'string'
+				? raw.twoFactor
+				: undefined;
 
 		const cyncLogger = toCyncLogger(this.log);
 		const tcpClient = new TcpClient(cyncLogger);
@@ -177,8 +196,8 @@ export class CyncAppPlatform implements DynamicPlatformPlugin {
 			new ConfigClient(cyncLogger),
 			tcpClient,
 			{
-				email: username ?? '',
-				password: password ?? '',
+				username,
+				password,
 				twoFactor,
 			},
 			this.api.user.storagePath(),
@@ -200,19 +219,21 @@ export class CyncAppPlatform implements DynamicPlatformPlugin {
 		});
 	}
 
-	/**
-	 * Called when cached accessories are restored from disk.
-	 */
-	configureAccessory(accessory: PlatformAccessory): void {
-		this.log.info('Restoring cached accessory', accessory.displayName);
-		this.accessories.push(accessory);
-	}
-
 	private async loadCync(): Promise<void> {
 		try {
-			const cfg = this.config as Record<string, unknown>;
-			const username = (cfg.username ?? cfg.email) as string | undefined;
-			const password = cfg.password as string | undefined;
+			const raw = this.config as Record<string, unknown>;
+
+			const username =
+				typeof raw.username === 'string'
+					? raw.username
+					: typeof raw.email === 'string'
+						? raw.email
+						: '';
+
+			const password =
+				typeof raw.password === 'string'
+					? raw.password
+					: '';
 
 			if (!username || !password) {
 				this.log.warn('Cync: credentials missing in config.json; skipping cloud login.');
@@ -237,7 +258,6 @@ export class CyncAppPlatform implements DynamicPlatformPlugin {
 			);
 
 			// Ask the CyncClient for the LAN login code derived from stored session.
-			// If it returns an empty blob, LAN is disabled but cloud still works.
 			let loginCode: Uint8Array = new Uint8Array();
 			try {
 				loginCode = this.client.getLanLoginCode();
@@ -254,7 +274,6 @@ export class CyncAppPlatform implements DynamicPlatformPlugin {
 					loginCode.length,
 				);
 
-				// ### 🧩 LAN Transport Bootstrap: wire frame listeners via CyncClient
 				await this.client.startTransport(cloudConfig, loginCode);
 			} else {
 				this.log.info(

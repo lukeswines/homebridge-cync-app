@@ -1,0 +1,182 @@
+<!-- homebridge-ui/public/index.html -->
+<div class="text-center mb-3">
+	<img
+		src="icon.png"
+		alt="Cync App Icon"
+		style="width:96px;height:96px;border-radius:5px;"
+	/>
+</div>
+
+<div class="card mb-3">
+	<div class="card-body">
+		<h3 class="card-title">Homebridge Cync App</h3>
+		<p class="card-text">
+		Enter your Cync Username, Password, and 6 digit verification code emailed to you by Cync.
+		To obtain a fresh code, use the <strong>Request Verification Code</strong> button, then click the Homebridge
+		<strong>Save</strong> button at the bottom once you’ve entered the code.
+		</p>
+	</div>
+</div>
+
+<div class="card mb-3">
+	<div class="card-body">
+		<h5 class="card-title">Cync Cloud Credentials</h5>
+
+		<div class="mb-3">
+			<label for="cyncEmail" class="form-label">Email</label>
+			<input type="email" id="cyncEmail" class="form-control" autocomplete="username">
+		</div>
+
+		<div class="mb-3">
+			<label for="cyncPassword" class="form-label">Password</label>
+			<input type="password" id="cyncPassword" class="form-control" autocomplete="current-password">
+		</div>
+
+		<div class="d-flex flex-wrap gap-2 mb-3">
+			<button id="cyncRequestOtpBtn" class="btn btn-secondary">
+				Request Verification Code
+			</button>
+			<button id="cyncSignOutBtn" class="btn btn-outline-danger">
+				Sign Out
+			</button>
+			<span id="cyncStatus" class="align-self-center text-muted ms-2"></span>
+		</div>
+
+		<div class="mb-3">
+			<label for="cyncOtp" class="form-label">Verification Code (OTP)</label>
+			<input type="text" id="cyncOtp" class="form-control" autocomplete="one-time-code">
+			</div>
+		</div>
+	</div>
+</div>
+
+<script>
+homebridge.addEventListener('ready', async () => {
+	const emailInput = document.getElementById('cyncEmail');
+	const passwordInput = document.getElementById('cyncPassword');
+	const otpInput = document.getElementById('cyncOtp');
+	const requestOtpBtn = document.getElementById('cyncRequestOtpBtn');
+	const signOutBtn = document.getElementById('cyncSignOutBtn');
+	const statusEl = document.getElementById('cyncStatus');
+
+	let pluginConfig = await homebridge.getPluginConfig();
+	let cfg = pluginConfig[0] || {};
+
+	// Helper to update in-memory pluginConfig (persisted when user clicks Save in HB)
+	async function updateConfig(partial) {
+		cfg = { ...cfg, ...partial };
+		pluginConfig = [cfg];
+		await homebridge.updatePluginConfig(pluginConfig);
+	}
+
+	function setLockedState(locked) {
+		emailInput.disabled = locked;
+		passwordInput.disabled = locked;
+		otpInput.disabled = locked;
+		requestOtpBtn.disabled = locked;
+		// Sign Out remains enabled so the user can clear things
+	}
+
+	// Load from config.json into UI
+	emailInput.value = cfg.username || '';
+	passwordInput.value = cfg.password || '';
+	otpInput.value = cfg.twoFactor || '';
+
+	// Check token status and lock fields if a token exists
+	try {
+		const status = await homebridge.request('/status');
+		if (status && status.ok && status.hasToken) {
+			setLockedState(true);
+			statusEl.textContent = 'Signed in. Click Sign Out to change credentials.';
+		}
+	} catch (e) {
+		console.error('[cync-ui] /status request failed:', e);
+	}
+
+	// Request OTP email via server.js
+	requestOtpBtn.addEventListener('click', async () => {
+		const email = emailInput.value.trim();
+		const password = passwordInput.value; // do not trim
+
+		if (!email || !password) {
+			homebridge.toast.warning('Enter email and password first.', 'Missing Credentials');
+			return;
+		}
+
+		homebridge.showSpinner();
+		statusEl.textContent = 'Requesting verification code…';
+
+		try {
+			// Persist latest credentials BEFORE requesting OTP
+			await updateConfig({
+				username: email,
+				password,
+			});
+
+			const res = await homebridge.request('/request-otp', { email });
+
+			if (res && res.ok) {
+				statusEl.textContent = 'Code requested. Check your email.';
+				homebridge.toast.success('Verification code sent.', 'OTP Requested');
+			} else {
+				statusEl.textContent = 'Request may have failed. Check logs.';
+				homebridge.toast.warning('Unexpected response requesting code.', 'OTP Request');
+			}
+		} catch (err) {
+			console.error('[cync-ui] Failed to request OTP:', err);
+			statusEl.textContent = 'OTP request failed. See logs.';
+			homebridge.toast.error('Failed to request 2FA code.', 'Error');
+		} finally {
+			homebridge.hideSpinner();
+		}
+	});
+
+	// OTP field updates config; Homebridge Save persists it
+	otpInput.addEventListener('change', async () => {
+		try {
+			await updateConfig({
+				username: emailInput.value.trim(),
+				password: passwordInput.value,
+				twoFactor: otpInput.value.trim(),
+			});
+			statusEl.textContent = 'Verification code updated. Click Save.';
+		} catch (e) {
+			console.error('[cync-ui] Failed to update OTP in config:', e);
+			statusEl.textContent = 'Failed to update verification code.';
+		}
+	});
+
+	// Sign Out: clear token + unlock fields
+	signOutBtn.addEventListener('click', async () => {
+		homebridge.showSpinner();
+		statusEl.textContent = 'Signing out…';
+
+		try {
+			await homebridge.request('/sign-out');
+
+			// Clear UI fields
+			emailInput.value = '';
+			passwordInput.value = '';
+			otpInput.value = '';
+
+			// Clear config (in memory) and unlock inputs
+			await updateConfig({
+				username: '',
+				password: '',
+				twoFactor: '',
+			});
+
+			setLockedState(false);
+
+			statusEl.textContent = 'Signed out. Click Save to apply.';
+			homebridge.toast.success('Signed out. Click Save to apply.', 'Signed Out');
+		} catch (e) {
+			console.error('[cync-ui] Sign-out failed:', e);
+			statusEl.textContent = 'Sign-out failed.';
+			homebridge.toast.error('Failed to sign out.', 'Error');
+		} finally {
+			homebridge.hideSpinner();
+		}
+	});
+});
+</script>
