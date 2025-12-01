@@ -1,4 +1,17 @@
 # homebridge-cync-app
+
+[![verified-by-homebridge](https://img.shields.io/badge/homebridge-verified-blueviolet?color=%23491F59&style=flat)](https://github.com/homebridge/homebridge/wiki/Verified-Plugins)
+![platform](https://img.shields.io/badge/type-platform-lightgrey)
+[![npm](https://img.shields.io/npm/v/homebridge-cync-app.svg)](https://www.npmjs.com/package/homebridge-cync-app)
+[![npm downloads](https://img.shields.io/npm/dm/homebridge-cync-app.svg)](https://www.npmjs.com/package/homebridge-cync-app)
+![node-lts](https://img.shields.io/badge/node%20LTS-20%7C22%7C24-6aa84f)
+![license](https://img.shields.io/github/license/dash16/homebridge-cync-app.svg)
+
+[![issues](https://img.shields.io/github/issues/dash16/homebridge-cync-app.svg)](https://github.com/dash16/homebridge-cync-app/issues)
+![last commit](https://img.shields.io/github/last-commit/dash16/homebridge-cync-app.svg)
+![typescript](https://img.shields.io/badge/language-typescript-3178c6)
+
+
 Homebridge plugin that integrates your GE Cync account (via the Cync app/API) and exposes all supported devices: plugs, lights, switches, etc.
 
 It currently supports:
