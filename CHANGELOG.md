@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.1.6 – Cync lights with LAN color + dimming
+
+**Release Date:** 2025-12-05
+
+### Added
+- **Cync Lightbulb accessory support**
+  - Discover and expose color-capable Cync devices as native HomeKit `Lightbulb` accessories.
+  - Implemented LAN-backed `On`, `Brightness`, `Hue`, and `Saturation` characteristics using the Cync TCP transport.
+  - Per-accessory state is cached so HomeKit reads reflect the last known LAN state.
+
+- **Accessory metadata from Cync**
+  - Populate the Accessory Information service with data from the Cync cloud:
+    - `Manufacturer` → `GE Lighting`
+    - `Model` → derived from the Cync device display name and device type (for example, `Downlight (Type 46)`).
+    - `SerialNumber` → derived from Wi-Fi MAC, MAC, or device ID.
+    - `FirmwareRevision` → firmware version string reported by Cync.
+
+### Changed
+- Devices that were previously exposed as `Switch` are now migrated to `Lightbulb`:
+  - Any stale `Switch` service is removed before configuring the `Lightbulb` service.
+  - Accessory category is set to `LIGHTBULB` so HomeKit and other apps treat these as lights.
+
 ## v0.1.5 – Custom 2FA UI & Token Locking
 **Release Date:** 2025-11-29
 

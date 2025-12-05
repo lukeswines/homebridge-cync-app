@@ -1,3 +1,5 @@
+// src/cync/PlatformAccessory.ts
+
 import type { PlatformAccessory } from 'homebridge';
 import type { CyncAppPlatform } from './platform.js';
 

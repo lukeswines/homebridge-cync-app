@@ -427,6 +427,26 @@ export class CyncClient {
 						bulbsArray[0] ? Object.keys(bulbsArray[0] as Record<string, unknown>) : [],
 					);
 
+					// ### 🧩 Bulb Capability Debug: log each bulb so we can classify plugs vs lights
+					bulbsArray.forEach((bulb, index) => {
+						const record = bulb as Record<string, unknown>;
+
+						this.log.debug(
+							'CyncClient: bulb #%d for mesh %s → %o',
+							index,
+							meshName,
+							{
+								displayName: record.displayName,
+								deviceID: record.deviceID ?? record.deviceId,
+								deviceType: record.deviceType,
+								loadSelection: record.loadSelection,
+								defaultBrightness: record.defaultBrightness,
+								lightRingColor: record.lightRingColor,
+								raw: record,
+							},
+						);
+					});
+
 					type RawDevice = Record<string, unknown>;
 					const rawDevices = bulbsArray as unknown[];
 

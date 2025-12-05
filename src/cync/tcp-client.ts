@@ -38,12 +38,7 @@ export class TcpClient {
 	private heartbeatTimer: NodeJS.Timeout | null = null;
 	private rawFrameListeners: RawFrameListener[] = [];
 	private controllerToDevice = new Map<number, string>();
-	/**
-	 * ### 🧩 LAN Command Serializer: Ensures TCP commands are sent one at a time
-	 *
-	 * Wraps any TCP command in a promise chain so commands are serialized
-	 * and cannot be written to the socket concurrently.
-	 */
+
 	private enqueueCommand<T>(fn: () => Promise<T>): Promise<T> {
 		let resolveWrapper: (value: T | PromiseLike<T>) => void;
 		let rejectWrapper: (reason?: unknown) => void;
@@ -179,7 +174,6 @@ export class TcpClient {
 		await this.ensureConnected();
 	}
 
-
 	public applyLanTopology(topology: {
 		homeDevices: Record<string, string[]>;
 		switchIdToHomeId: Record<number, string>;
@@ -201,10 +195,6 @@ export class TcpClient {
 		);
 	}
 
-	/**
-	 * Ensure we have an open, logged-in socket.
-	 * If the socket is closed or missing, attempt to reconnect.
-	 */
 	private async ensureConnected(): Promise<boolean> {
 		if (this.socket && !this.socket.destroyed) {
 			return true;
@@ -221,10 +211,6 @@ export class TcpClient {
 		return !!(this.socket && !this.socket.destroyed);
 	}
 
-	/**
-	 * Open a new socket to cm.gelighting.com and send the loginCode,
-	 * mirroring the HA integration’s behavior.
-	 */
 	private async establishSocket(): Promise<void> {
 		const host = 'cm.gelighting.com';
 		const portTLS = 23779;
@@ -367,6 +353,69 @@ export class TcpClient {
 		]);
 	}
 
+	private buildComboPacket(
+		controllerId: number,
+		meshId: number,
+		on: boolean,
+		brightnessPct: number,
+		colorTone: number,
+		rgb: { r: number; g: number; b: number },
+		seq: number,
+	): Buffer {
+		const header = Buffer.from('7300000022', 'hex');
+
+		const switchBytes = Buffer.alloc(4);
+		switchBytes.writeUInt32BE(controllerId, 0);
+
+		const seqBytes = Buffer.alloc(2);
+		seqBytes.writeUInt16BE(seq, 0);
+
+		const middle = Buffer.from('007e00000000f8f010000000000000', 'hex');
+
+		const meshBytes = Buffer.alloc(2);
+		meshBytes.writeUInt16LE(meshId, 0);
+
+		const tailPrefix = Buffer.from('f00000', 'hex');
+
+		const onByte = on ? 1 : 0;
+		const brightnessByte = Math.max(0, Math.min(100, Math.round(brightnessPct)));
+		const colorToneByte = Math.max(0, Math.min(255, Math.round(colorTone)));
+
+		const r = Math.max(0, Math.min(255, Math.round(rgb.r)));
+		const g = Math.max(0, Math.min(255, Math.round(rgb.g)));
+		const b = Math.max(0, Math.min(255, Math.round(rgb.b)));
+
+		const rgbBytes = Buffer.from([r, g, b]);
+
+		const checksumSeed =
+				496 +
+				meshBytes[0] +
+				meshBytes[1] +
+				onByte +
+				brightnessByte +
+				colorToneByte +
+				r +
+				g +
+				b;
+
+		const checksum = Buffer.from([checksumSeed & 0xff]);
+		const end = Buffer.from('7e', 'hex');
+
+		return Buffer.concat([
+			header,
+			switchBytes,
+			seqBytes,
+			middle,
+			meshBytes,
+			tailPrefix,
+			Buffer.from([onByte]),
+			Buffer.from([brightnessByte]),
+			Buffer.from([colorToneByte]),
+			rgbBytes,
+			checksum,
+			end,
+		]);
+	}
 	public async disconnect(): Promise<void> {
 		this.log.info('[Cync TCP] disconnect() called.');
 		if (this.heartbeatTimer) {
@@ -400,10 +449,6 @@ export class TcpClient {
 		this.rawFrameListeners.push(listener);
 	}
 
-	/**
-	 * High-level API to change switch state.
-	 * Ensures we have a live socket before sending and serializes commands.
-	 */
 	public async setSwitchState(
 		deviceId: string,
 		params: { on: boolean },
@@ -429,6 +474,14 @@ export class TcpClient {
 			}
 
 			const record = device as Record<string, unknown>;
+			this.log.debug(
+				'[Cync TCP] setSwitchState: deviceId=%s device_type=%o switch_controller=%o mesh_id=%o home_id=%o',
+				deviceId,
+				record.device_type,
+				record.switch_controller,
+				record.mesh_id,
+				record.home_id,
+			);
 			const controllerId = Number(record.switch_controller);
 			const meshIndex = Number(record.mesh_id);
 
@@ -456,6 +509,143 @@ export class TcpClient {
 		});
 	}
 
+	public async setBrightness(deviceId: string, brightnessPct: number): Promise<void> {
+		return this.enqueueCommand(async () => {
+			if (!this.config) {
+				this.log.warn('[Cync TCP] setBrightness: no config available.');
+				return;
+			}
+
+			const connected = await this.ensureConnected();
+			if (!connected || !this.socket || this.socket.destroyed) {
+				this.log.warn(
+					'[Cync TCP] setBrightness: socket not ready even after reconnect attempt.',
+				);
+				return;
+			}
+
+			const device = this.findDevice(deviceId);
+			if (!device) {
+				this.log.warn('[Cync TCP] setBrightness: unknown deviceId=%s', deviceId);
+				return;
+			}
+
+			const record = device as Record<string, unknown>;
+			const controllerId = Number(record.switch_controller);
+			const meshIndex = Number(record.mesh_id);
+
+			if (!Number.isFinite(controllerId) || !Number.isFinite(meshIndex)) {
+				this.log.warn(
+					'[Cync TCP] setBrightness: device %s missing LAN fields (switch_controller=%o mesh_id=%o)',
+					deviceId,
+					record.switch_controller,
+					record.mesh_id,
+				);
+				return;
+			}
+
+			const clamped = Math.max(0, Math.min(100, Number(brightnessPct)));
+			const on = clamped > 0;
+
+			const seq = this.nextSeq();
+
+			// White-only combo control for now; color support can layer on this later.
+			const packet = this.buildComboPacket(
+				controllerId,
+				meshIndex,
+				on,
+				clamped,
+				255, // color_tone=255 ("white" in HA integration)
+				{ r: 255, g: 255, b: 255 },
+				seq,
+			);
+
+			this.socket.write(packet);
+			this.log.info(
+				'[Cync TCP] Sent combo (brightness) packet: device=%s on=%s brightness=%d seq=%d',
+				deviceId,
+				String(on),
+				clamped,
+				seq,
+			);
+		});
+	}
+
+	public async setColor(
+		deviceId: string,
+		rgb: { r: number; g: number; b: number },
+		brightnessPct?: number,
+	): Promise<void> {
+		return this.enqueueCommand(async () => {
+			if (!this.config) {
+				this.log.warn('[Cync TCP] setColor: no config available.');
+				return;
+			}
+
+			const connected = await this.ensureConnected();
+			if (!connected || !this.socket || this.socket.destroyed) {
+				this.log.warn(
+					'[Cync TCP] setColor: socket not ready even after reconnect attempt.',
+				);
+				return;
+			}
+
+			const device = this.findDevice(deviceId);
+			if (!device) {
+				this.log.warn('[Cync TCP] setColor: unknown deviceId=%s', deviceId);
+				return;
+			}
+
+			const record = device as Record<string, unknown>;
+			const controllerId = Number(record.switch_controller);
+			const meshIndex = Number(record.mesh_id);
+
+			if (!Number.isFinite(controllerId) || !Number.isFinite(meshIndex)) {
+				this.log.warn(
+					'[Cync TCP] setColor: device %s missing LAN fields (switch_controller=%o mesh_id=%o)',
+					deviceId,
+					record.switch_controller,
+					record.mesh_id,
+				);
+				return;
+			}
+
+			const clampedBrightness = Math.max(
+				0,
+				Math.min(100, Math.round(brightnessPct ?? 100)),
+			);
+			const on = clampedBrightness > 0;
+
+			const r = Math.max(0, Math.min(255, Math.round(rgb.r)));
+			const g = Math.max(0, Math.min(255, Math.round(rgb.g)));
+			const b = Math.max(0, Math.min(255, Math.round(rgb.b)));
+
+			const seq = this.nextSeq();
+
+			// colorTone=254 => "color" mode, per HA's combo_control for RGB
+			const packet = this.buildComboPacket(
+				controllerId,
+				meshIndex,
+				on,
+				clampedBrightness,
+				254,
+				{ r, g, b },
+				seq,
+			);
+
+			this.socket.write(packet);
+			this.log.info(
+				'[Cync TCP] Sent color combo packet: device=%s on=%s brightness=%d rgb=(%d,%d,%d) seq=%d',
+				deviceId,
+				String(on),
+				clampedBrightness,
+				r,
+				g,
+				b,
+				seq,
+			);
+		});
+	}
 	private findDevice(deviceId: string) {
 		for (const mesh of this.config?.meshes ?? []) {
 			for (const dev of mesh.devices ?? []) {
@@ -563,13 +753,14 @@ export class TcpClient {
 		// Default payload is the raw frame
 		let payload: unknown = frame;
 
-		if (type === 0x83) {
-			// Preferred path: HA-style per-device parsing using homeDevices + switchIdToHomeId
+		// 0x73 / 0x83 carry per-device state updates on the LAN.
+		// Mirror the HA integration: try the topology-based parser first.
+		if (type === 0x73 || type === 0x83) {
 			const lanParsed = this.parseLanSwitchUpdate(frame);
 			if (lanParsed) {
 				payload = lanParsed;
-			} else {
-				// Fallback to legacy controller-level parsing
+			} else if (type === 0x83) {
+				// Fallback to legacy controller-level parsing only for 0x83
 				const parsed = this.parseSwitchStateFrame(frame);
 				if (parsed) {
 					const deviceId = this.controllerToDevice.get(parsed.controllerId);

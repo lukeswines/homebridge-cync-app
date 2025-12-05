@@ -19,8 +19,10 @@ It currently supports:
 - Email + password + 2FA (one-time code) login
 - Persistent token storage in the Homebridge storage path
 - Discovery of Cync “meshes” and devices from the cloud
-- Exposing Cync outlets as HomeKit switches with their Cync `displayName`
-
+- Cync plugs exposed as HomeKit switches/outlets.
+- **Cync lights** exposed as HomeKit lightbulbs with:
+  - On/Off, dimming (Brightness), and color (Hue/Saturation) over LAN.
+- Accessory Information populated from your Cync account (manufacturer, model, serial, firmware).
 > Status: **Early LAN preview.** Tested with Cync smart plugs only. Other device types may not appear or may behave incorrectly.
 
 ## Installation
