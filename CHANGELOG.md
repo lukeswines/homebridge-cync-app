@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.7 – Token refresh & accessory polling
+
+**Release Date:** 2025-12-10
+
+### Added
+- Automatic Cync token refresh so cloud sessions stay valid longer without manual re-login.
+- Accessory state polling so Homebridge periodically refreshes device state from Cync, reducing stale states and missed updates.
+
 ## 0.1.6 – Cync lights with LAN color + dimming
 
 **Release Date:** 2025-12-05

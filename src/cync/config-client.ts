@@ -64,6 +64,11 @@ export interface CyncCloudConfig {
 	meshes: CyncDeviceMesh[];
 }
 
+export interface CyncRefreshResponse {
+	accessToken: string;
+	refreshToken?: string;
+	expiresAt?: number;
+}
 
 export interface CyncLogger {
 	debug(message: string, ...args: unknown[]): void;
@@ -217,6 +222,80 @@ export class ConfigClient {
 			authorize,
 			raw: json,
 		};
+	}
+	/**
+	 * Refresh the access token using a stored refresh token.
+	 *
+	 * This mirrors the 2FA login flow in shape, but only exchanges the
+	 * refresh_token for a new access_token (and possibly a new refresh_token).
+	 */
+	public async refreshAccessToken(refreshToken: string): Promise<CyncRefreshResponse> {
+		const url = `${CYNC_API_BASE}user_auth/refresh`;
+		this.log.debug('Refreshing Cync access token…');
+
+		const body = {
+			corp_id: CORP_ID,
+			refresh_token: refreshToken,
+			resource: ConfigClient.randomLoginResource(),
+		};
+
+		const res = (await fetch(url, {
+			method: 'POST',
+			headers: {
+				'Content-Type': 'application/json',
+			},
+			body: JSON.stringify(body),
+		})) as HttpResponse;
+
+		const json: unknown = await res.json().catch(async () => {
+			const text = await res.text().catch(() => '');
+			throw new Error(`Cync refresh returned non-JSON payload: ${text}`);
+		});
+
+		if (!res.ok) {
+			this.log.error(
+				'Cync refresh failed: HTTP %d %s %o',
+				res.status,
+				res.statusText,
+				json,
+			);
+			const errBody = json as CyncErrorBody;
+			const msg =
+				errBody.error?.msg ??
+				`Cync refresh failed with status ${res.status} ${res.statusText}`;
+			throw new Error(msg);
+		}
+
+		const obj = json as Record<string, unknown>;
+		this.log.debug('Cync refresh response: keys=%o', Object.keys(obj));
+
+		const accessTokenRaw = obj.access_token ?? obj.accessToken;
+		const refreshTokenRaw = obj.refresh_token ?? obj.refreshToken;
+		const expiresAtRaw = obj.expires_at ?? obj.expiresAt;
+
+		const accessToken =
+			typeof accessTokenRaw === 'string' && accessTokenRaw.length > 0
+				? accessTokenRaw
+				: undefined;
+
+		if (!accessToken) {
+			this.log.error('Cync refresh missing access_token: %o', json);
+			throw new Error('Cync refresh response missing access_token');
+		}
+
+		const next: CyncRefreshResponse = {
+			accessToken,
+		};
+
+		if (typeof refreshTokenRaw === 'string' && refreshTokenRaw.length > 0) {
+			next.refreshToken = refreshTokenRaw;
+		}
+
+		if (typeof expiresAtRaw === 'number') {
+			next.expiresAt = expiresAtRaw;
+		}
+
+		return next;
 	}
 
 	/**

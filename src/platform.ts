@@ -13,6 +13,7 @@ import { ConfigClient } from './cync/config-client.js';
 import type { CyncCloudConfig, CyncDevice, CyncDeviceMesh } from './cync/config-client.js';
 import { TcpClient } from './cync/tcp-client.js';
 import type { CyncLogger } from './cync/config-client.js';
+import { lookupDeviceModel } from './cync/device-catalog.js';
 
 // Narrowed view of the Cync device properties returned by getDeviceProperties()
 type CyncDeviceRaw = {
@@ -118,6 +119,31 @@ function hsvToRgb(hue: number, saturation: number, value: number): { r: number; 
 	};
 }
 
+function resolveDeviceType(device: CyncDevice): number | undefined {
+	const typedDevice = device as unknown as {
+		device_type?: number;
+		raw?: { deviceType?: number | string };
+	};
+
+	if (typeof typedDevice.device_type === 'number') {
+		return typedDevice.device_type;
+	}
+
+	const rawType = typedDevice.raw?.deviceType;
+	if (typeof rawType === 'number') {
+		return rawType;
+	}
+
+	if (typeof rawType === 'string' && rawType.trim() !== '') {
+		const parsed = Number(rawType.trim());
+		if (!Number.isNaN(parsed)) {
+			return parsed;
+		}
+	}
+
+	return undefined;
+}
+
 export class CyncAppPlatform implements DynamicPlatformPlugin {
 	public readonly accessories: PlatformAccessory[] = [];
 	public configureAccessory(accessory: PlatformAccessory): void {
@@ -132,6 +158,43 @@ export class CyncAppPlatform implements DynamicPlatformPlugin {
 
 	private cloudConfig: CyncCloudConfig | null = null;
 	private readonly deviceIdToAccessory = new Map<string, PlatformAccessory>();
+	private readonly deviceLastSeen = new Map<string, number>();
+	private readonly devicePollTimers = new Map<string, NodeJS.Timeout>();
+
+	private readonly offlineTimeoutMs = 5 * 60 * 1000; // 5 minutes
+	private readonly pollIntervalMs = 60_000; // 60 seconds
+
+	private markDeviceSeen(deviceId: string): void {
+		this.deviceLastSeen.set(deviceId, Date.now());
+	}
+
+	private isDeviceProbablyOffline(deviceId: string): boolean {
+		const last = this.deviceLastSeen.get(deviceId);
+		if (!last) {
+			// No data yet; treat as online until we know better
+			return false;
+		}
+		return Date.now() - last > this.offlineTimeoutMs;
+	}
+
+	private startPollingDevice(deviceId: string): void {
+		// For now this is just a placeholder hook. We keep a timer per device so
+		// you can later add a real poll (e.g. TCP “ping” or cloud get) here if you want.
+		const existing = this.devicePollTimers.get(deviceId);
+		if (existing) {
+			clearInterval(existing);
+		}
+
+		const timer = setInterval(() => {
+			// Optional future hook:
+			// - Call a "getDeviceState" or similar on tcpClient/client
+			// - On success, call this.markDeviceSeen(deviceId)
+			// - On failure, optionally log or mark offline
+		}, this.pollIntervalMs);
+
+		this.devicePollTimers.set(deviceId, timer);
+	}
+
 	private handleLanUpdate(update: unknown): void {
 		// Parsed 0x83 frames from TcpClient.parseLanSwitchUpdate look like:
 		// { controllerId: number, deviceId?: string, on: boolean, level: number }
@@ -146,6 +209,7 @@ export class CyncAppPlatform implements DynamicPlatformPlugin {
 		}
 
 		const accessory = this.deviceIdToAccessory.get(payload.deviceId);
+		this.markDeviceSeen(payload.deviceId);
 		if (!accessory) {
 			this.log.debug(
 				'Cync: LAN update for unknown deviceId=%s; no accessory mapping',
@@ -235,6 +299,8 @@ export class CyncAppPlatform implements DynamicPlatformPlugin {
 			);
 			accessory.removeService(existingLight);
 		}
+		this.applyAccessoryInformationFromCyncDevice(accessory, device, deviceName, deviceId);
+
 		// Ensure context is initialized
 		const ctx = accessory.context as CyncAccessoryContext;
 		ctx.cync = ctx.cync ?? {
@@ -246,10 +312,18 @@ export class CyncAppPlatform implements DynamicPlatformPlugin {
 
 		// Remember mapping for LAN updates
 		this.deviceIdToAccessory.set(deviceId, accessory);
+		this.markDeviceSeen(deviceId);
+		this.startPollingDevice(deviceId);
 
 		service
 			.getCharacteristic(this.api.hap.Characteristic.On)
 			.onGet(() => {
+				if (this.isDeviceProbablyOffline(deviceId)) {
+					throw new this.api.hap.HapStatusError(
+						this.api.hap.HAPStatus.SERVICE_COMMUNICATION_FAILURE,
+					);
+				}
+
 				const currentOn = !!ctx.cync?.on;
 				this.log.info(
 					'Cync: On.get -> %s for %s (deviceId=%s)',
@@ -339,6 +413,8 @@ export class CyncAppPlatform implements DynamicPlatformPlugin {
 
 		// Remember mapping for LAN updates
 		this.deviceIdToAccessory.set(deviceId, accessory);
+		this.markDeviceSeen(deviceId);
+		this.startPollingDevice(deviceId);
 
 		const Characteristic = this.api.hap.Characteristic;
 
@@ -346,6 +422,12 @@ export class CyncAppPlatform implements DynamicPlatformPlugin {
 		service
 			.getCharacteristic(Characteristic.On)
 			.onGet(() => {
+				if (this.isDeviceProbablyOffline(deviceId)) {
+					throw new this.api.hap.HapStatusError(
+						this.api.hap.HAPStatus.SERVICE_COMMUNICATION_FAILURE,
+					);
+				}
+
 				const currentOn = !!ctx.cync?.on;
 				this.log.info(
 					'Cync: Light On.get -> %s for %s (deviceId=%s)',
@@ -378,13 +460,32 @@ export class CyncAppPlatform implements DynamicPlatformPlugin {
 				// Optimistic local cache; LAN update will confirm
 				cyncMeta.on = on;
 
-				await this.tcpClient.setSwitchState(cyncMeta.deviceId, { on });
-			});
+				try {
+					await this.tcpClient.setSwitchState(cyncMeta.deviceId, { on });
+					this.markDeviceSeen(cyncMeta.deviceId);
+				} catch (err) {
+					this.log.warn(
+						'Cync: Light On.set failed for %s (deviceId=%s): %s',
+						deviceName,
+						cyncMeta.deviceId,
+						(err as Error).message ?? String(err),
+					);
 
+					throw new this.api.hap.HapStatusError(
+						this.api.hap.HAPStatus.SERVICE_COMMUNICATION_FAILURE,
+					);
+				}
+			});
 		// ----- Brightness (dimming via LAN combo_control) -----
 		service
 			.getCharacteristic(Characteristic.Brightness)
 			.onGet(() => {
+				if (this.isDeviceProbablyOffline(deviceId)) {
+					throw new this.api.hap.HapStatusError(
+						this.api.hap.HAPStatus.SERVICE_COMMUNICATION_FAILURE,
+					);
+				}
+
 				const current = ctx.cync?.brightness;
 
 				// If we have a cached LAN level, use it; otherwise infer from On.
@@ -406,10 +507,7 @@ export class CyncAppPlatform implements DynamicPlatformPlugin {
 					return;
 				}
 
-				const brightness = Math.max(
-					0,
-					Math.min(100, Number(value)),
-				);
+				const brightness = Math.max(0, Math.min(100, Number(value)));
 
 				if (!Number.isFinite(brightness)) {
 					this.log.warn(
@@ -432,18 +530,43 @@ export class CyncAppPlatform implements DynamicPlatformPlugin {
 					cyncMeta.deviceId,
 				);
 
-				// If we're in "color mode", keep the existing RGB and scale brightness via setColor();
-				// otherwise treat this as a white-brightness change.
-				if (cyncMeta.colorActive && cyncMeta.rgb) {
-					await this.tcpClient.setColor(cyncMeta.deviceId, cyncMeta.rgb, brightness);
-				} else {
-					await this.tcpClient.setBrightness(cyncMeta.deviceId, brightness);
+				try {
+					// If we're in "color mode", keep the existing RGB and scale brightness via setColor();
+					// otherwise treat this as a white-brightness change.
+					if (cyncMeta.colorActive && cyncMeta.rgb) {
+						await this.tcpClient.setColor(
+							cyncMeta.deviceId,
+							cyncMeta.rgb,
+							brightness,
+						);
+					} else {
+						await this.tcpClient.setBrightness(cyncMeta.deviceId, brightness);
+					}
+
+					this.markDeviceSeen(cyncMeta.deviceId);
+				} catch (err) {
+					this.log.warn(
+						'Cync: Light Brightness.set failed for %s (deviceId=%s): %s',
+						deviceName,
+						cyncMeta.deviceId,
+						(err as Error).message ?? String(err),
+					);
+
+					throw new this.api.hap.HapStatusError(
+						this.api.hap.HAPStatus.SERVICE_COMMUNICATION_FAILURE,
+					);
 				}
 			});
 		// ----- Hue -----
 		service
 			.getCharacteristic(Characteristic.Hue)
 			.onGet(() => {
+				if (this.isDeviceProbablyOffline(deviceId)) {
+					throw new this.api.hap.HapStatusError(
+						this.api.hap.HAPStatus.SERVICE_COMMUNICATION_FAILURE,
+					);
+				}
+
 				const hue = ctx.cync?.hue;
 				if (typeof hue === 'number') {
 					return hue;
@@ -474,13 +597,11 @@ export class CyncAppPlatform implements DynamicPlatformPlugin {
 				}
 
 				// Use cached saturation/brightness if available, otherwise sane defaults
-				const saturation = typeof cyncMeta.saturation === 'number'
-					? cyncMeta.saturation
-					: 100;
+				const saturation =
+					typeof cyncMeta.saturation === 'number' ? cyncMeta.saturation : 100;
 
-				const brightness = typeof cyncMeta.brightness === 'number'
-					? cyncMeta.brightness
-					: 100;
+				const brightness =
+					typeof cyncMeta.brightness === 'number' ? cyncMeta.brightness : 100;
 
 				const rgb = hsvToRgb(hue, saturation, brightness);
 
@@ -503,13 +624,32 @@ export class CyncAppPlatform implements DynamicPlatformPlugin {
 					brightness,
 				);
 
-				await this.tcpClient.setColor(cyncMeta.deviceId, rgb, brightness);
-			});
+				try {
+					await this.tcpClient.setColor(cyncMeta.deviceId, rgb, brightness);
+					this.markDeviceSeen(cyncMeta.deviceId);
+				} catch (err) {
+					this.log.warn(
+						'Cync: Light Hue.set failed for %s (deviceId=%s): %s',
+						deviceName,
+						cyncMeta.deviceId,
+						(err as Error).message ?? String(err),
+					);
 
+					throw new this.api.hap.HapStatusError(
+						this.api.hap.HAPStatus.SERVICE_COMMUNICATION_FAILURE,
+					);
+				}
+			});
 		// ----- Saturation -----
 		service
 			.getCharacteristic(Characteristic.Saturation)
 			.onGet(() => {
+				if (this.isDeviceProbablyOffline(deviceId)) {
+					throw new this.api.hap.HapStatusError(
+						this.api.hap.HAPStatus.SERVICE_COMMUNICATION_FAILURE,
+					);
+				}
+
 				const sat = ctx.cync?.saturation;
 				if (typeof sat === 'number') {
 					return sat;
@@ -538,13 +678,10 @@ export class CyncAppPlatform implements DynamicPlatformPlugin {
 					return;
 				}
 
-				const hue = typeof cyncMeta.hue === 'number'
-					? cyncMeta.hue
-					: 0;
+				const hue = typeof cyncMeta.hue === 'number' ? cyncMeta.hue : 0;
 
-				const brightness = typeof cyncMeta.brightness === 'number'
-					? cyncMeta.brightness
-					: 100;
+				const brightness =
+					typeof cyncMeta.brightness === 'number' ? cyncMeta.brightness : 100;
 
 				const rgb = hsvToRgb(hue, saturation, brightness);
 
@@ -567,7 +704,21 @@ export class CyncAppPlatform implements DynamicPlatformPlugin {
 					brightness,
 				);
 
-				await this.tcpClient.setColor(cyncMeta.deviceId, rgb, brightness);
+				try {
+					await this.tcpClient.setColor(cyncMeta.deviceId, rgb, brightness);
+					this.markDeviceSeen(cyncMeta.deviceId);
+				} catch (err) {
+					this.log.warn(
+						'Cync: Light Saturation.set failed for %s (deviceId=%s): %s',
+						deviceName,
+						cyncMeta.deviceId,
+						(err as Error).message ?? String(err),
+					);
+
+					throw new this.api.hap.HapStatusError(
+						this.api.hap.HAPStatus.SERVICE_COMMUNICATION_FAILURE,
+					);
+				}
 			});
 	}
 
@@ -593,21 +744,42 @@ export class CyncAppPlatform implements DynamicPlatformPlugin {
 		// Manufacturer: fixed for all Cync devices
 		infoService.updateCharacteristic(Characteristic.Manufacturer, 'GE Lighting');
 
-		// Model: use the device's displayName + type if available
-		const modelBase =
-			typeof rawDevice.displayName === 'string' && rawDevice.displayName.trim().length > 0
-				? rawDevice.displayName.trim()
-				: 'Cync Device';
+		// Model: prefer catalog entry (Cync app-style model name), fall back to raw info
+		const resolvedType = resolveDeviceType(device);
+		const catalogEntry = typeof resolvedType === 'number'
+			? lookupDeviceModel(resolvedType)
+			: undefined;
 
-		const modelSuffix =
-			typeof rawDevice.deviceType === 'number'
-				? ` (Type ${rawDevice.deviceType})`
-				: '';
+		let model: string;
 
-		infoService.updateCharacteristic(
-			Characteristic.Model,
-			modelBase + modelSuffix,
-		);
+		if (catalogEntry) {
+			// Use the Cync app-style model name
+			model = catalogEntry.modelName;
+
+			// Persist for debugging / future use
+			const ctx = accessory.context as Record<string, unknown>;
+			ctx.deviceType = resolvedType;
+			ctx.modelName = catalogEntry.modelName;
+			if (catalogEntry.marketingName) {
+				ctx.marketingName = catalogEntry.marketingName;
+			}
+		} else {
+			// Fallback: use device displayName + type
+			const modelBase =
+				typeof rawDevice.displayName === 'string' && rawDevice.displayName.trim().length > 0
+					? rawDevice.displayName.trim()
+					: 'Cync Device';
+
+			const modelSuffix =
+				typeof resolvedType === 'number'
+					? ` (Type ${resolvedType})`
+					: '';
+
+			model = modelBase + modelSuffix;
+		}
+
+		infoService.updateCharacteristic(Characteristic.Model, model);
+
 
 		// Serial: prefer wifiMac, then mac, then deviceID, then the string deviceId
 		const serial =
@@ -809,29 +981,7 @@ export class CyncAppPlatform implements DynamicPlatformPlugin {
 					this.accessories.push(accessory);
 				}
 
-				// Decide how to expose this device in HomeKit based on device_type / raw.deviceType
-				const typedDevice = device as unknown as {
-					device_type?: number;
-					raw?: { deviceType?: number | string };
-				};
-
-				let deviceType: number | undefined;
-
-				if (typeof typedDevice.device_type === 'number') {
-					deviceType = typedDevice.device_type;
-				} else if (typedDevice.raw && typeof typedDevice.raw.deviceType === 'number') {
-					deviceType = typedDevice.raw.deviceType;
-				} else if (
-					typedDevice.raw &&
-					typeof typedDevice.raw.deviceType === 'string' &&
-					typedDevice.raw.deviceType.trim() !== ''
-				) {
-					const parsed = Number(typedDevice.raw.deviceType);
-					if (!Number.isNaN(parsed)) {
-						deviceType = parsed;
-					}
-				}
-
+				const deviceType = resolveDeviceType(device);
 				const isDownlight = deviceType === 46;
 
 				if (isDownlight) {

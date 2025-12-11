@@ -23,7 +23,9 @@ It currently supports:
 - **Cync lights** exposed as HomeKit lightbulbs with:
   - On/Off, dimming (Brightness), and color (Hue/Saturation) over LAN.
 - Accessory Information populated from your Cync account (manufacturer, model, serial, firmware).
-> Status: **Early LAN preview.** Tested with Cync smart plugs only. Other device types may not appear or may behave incorrectly.
+- Automatic token refresh to keep your Cync session alive without re-entering codes.
+- Periodic accessory polling so Homebridge stays in sync with the Cync app.
+> Status: **Early LAN preview.** Tested with Cync smart plugs and downlights. Other device types may not appear or may behave incorrectly.
 
 ## Installation
 

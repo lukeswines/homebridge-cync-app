@@ -321,6 +321,120 @@ export class CyncClient {
 	 *   // user reads email, gets code…
 	 *   await client.submitTwoFactor(username, password, code); // completes login
 	 */
+	// ### 🧩 Refresh Error Detector: identifies "Access-Token Expired" responses
+	private isAccessTokenExpiredError(err: unknown): boolean {
+		if (!err || typeof err !== 'object') {
+			return false;
+		}
+
+		type ErrorWithShape = {
+			status?: number;
+			message?: string;
+			error?: {
+				msg?: string;
+				code?: number;
+			};
+		};
+
+		const e = err as ErrorWithShape;
+
+		// Shape we see in logs:
+		// { error: { msg: 'Access-Token Expired', code: 4031021 } }
+		if (e.error && (e.error.msg === 'Access-Token Expired' || e.error.code === 4031021)) {
+			return true;
+		}
+
+		// Fallback: generic 403 with message string
+		if (e.status === 403 && e.message && e.message.includes('Access-Token Expired')) {
+			return true;
+		}
+
+		return false;
+	}
+
+	// ### 🧩 Token Refresh Helper: exchanges refreshToken for a new accessToken
+	private async refreshAccessToken(stored: CyncTokenData): Promise<CyncTokenData | null> {
+		if (!stored.refreshToken) {
+			this.log.warn(
+				'CyncClient: refreshAccessToken() called but no refreshToken is stored; cannot refresh.',
+			);
+			return null;
+		}
+
+		try {
+			const resp = await this.configClient.refreshAccessToken(stored.refreshToken);
+
+			const next: CyncTokenData = {
+				...stored,
+				accessToken: resp.accessToken,
+				refreshToken: resp.refreshToken ?? stored.refreshToken,
+				expiresAt: resp.expiresAt ?? stored.expiresAt,
+			};
+
+			await this.tokenStore.save(next);
+			this.tokenData = next;
+			this.applyAccessToken(next);
+
+			this.log.info(
+				'CyncClient: refreshed access token for userId=%s; expiresAt=%s',
+				next.userId,
+				next.expiresAt ? new Date(next.expiresAt).toISOString() : 'unknown',
+			);
+
+			return next;
+		} catch (err) {
+			this.log.error('CyncClient: token refresh failed: %o', err);
+			return null;
+		}
+	}
+
+	// ### 🧩 Cloud Config Wrapper: auto-refreshes access token
+	private async getCloudConfigWithRefresh(): Promise<CyncCloudConfig> {
+		try {
+			return await this.configClient.getCloudConfig();
+		} catch (err) {
+			if (this.isAccessTokenExpiredError(err) && this.tokenData) {
+				this.log.warn(
+					'CyncClient: access token expired when calling getCloudConfig(); refreshing and retrying once.',
+				);
+
+				const refreshed = await this.refreshAccessToken(this.tokenData);
+				if (refreshed) {
+					return await this.configClient.getCloudConfig();
+				}
+			}
+
+			throw err;
+		}
+	}
+
+	// ### 🧩 Device Properties Wrapper: auto-refresh on Access-Token Expired for mesh calls
+	private async getDevicePropertiesWithRefresh(
+		productId: string | number,
+		meshId: string | number,
+	): Promise<Record<string, unknown>> {
+		// Normalise to strings for ConfigClient
+		const productIdStr = String(productId);
+		const meshIdStr = String(meshId);
+
+		try {
+			return await this.configClient.getDeviceProperties(productIdStr, meshIdStr);
+		} catch (err) {
+			if (this.isAccessTokenExpiredError(err) && this.tokenData) {
+				this.log.warn(
+					'CyncClient: access token expired when calling getDeviceProperties(); refreshing and retrying once.',
+				);
+
+				const refreshed = await this.refreshAccessToken(this.tokenData);
+				if (refreshed) {
+					return await this.configClient.getDeviceProperties(productIdStr, meshIdStr);
+				}
+			}
+
+			throw err;
+		}
+	}
+
 	public async authenticate(username: string): Promise<void> {
 		const email = username.trim();
 
@@ -381,7 +495,7 @@ export class CyncClient {
 		this.ensureSession();
 
 		this.log.info('CyncClient: loading Cync cloud configuration…');
-		const cfg = await this.configClient.getCloudConfig();
+		const cfg = await this.getCloudConfigWithRefresh();
 
 		// Reset LAN topology caches on each reload
 		this.homeDevices = {};
@@ -405,7 +519,7 @@ export class CyncClient {
 			const homeControllers: number[] = [];
 
 			try {
-				const props = await this.configClient.getDeviceProperties(
+				const props = await this.getDevicePropertiesWithRefresh(
 					mesh.product_id,
 					mesh.id,
 				);
