@@ -52,6 +52,93 @@ export class CyncClient {
 	// Optional LAN update hook for the platform
 	private lanUpdateHandler: ((update: unknown) => void) | null = null;
 
+	// ### 🧩 Password Login Helper: background username/password login for new tokens
+	private async loginWithPasswordForToken(): Promise<CyncTokenData | null> {
+		const { username, password } = this.loginConfig;
+
+		if (!username || !password) {
+			this.log.error(
+				'CyncClient: cannot perform password login; username or password is missing from config.',
+			);
+			return null;
+		}
+
+		try {
+			this.log.warn(
+				'CyncClient: performing background username/password login (no OTP) to obtain a fresh token…',
+			);
+
+			const session = await this.configClient.loginWithPassword(
+				username.trim(),
+				password,
+			);
+
+			const raw = session.raw as Record<string, unknown>;
+			const authorize =
+				typeof raw.authorize === 'string' ? raw.authorize : undefined;
+
+			const s = session as unknown as SessionWithPossibleTokens;
+			const access = s.accessToken ?? s.jwt;
+
+			if (!access) {
+				this.log.error(
+					'CyncClient: password login session did not return an access token.',
+				);
+				return null;
+			}
+
+			const refresh = s.refreshToken ?? s.refreshJwt;
+			const expiresAt = s.expiresAt;
+
+			let lanLoginCode: string | undefined;
+			if (authorize) {
+				const userIdNum = Number.parseInt(session.userId, 10);
+				if (Number.isFinite(userIdNum) && userIdNum >= 0) {
+					const lanBlob = this.buildLanLoginCode(authorize, userIdNum);
+					lanLoginCode = Buffer.from(lanBlob).toString('base64');
+				} else {
+					this.log.warn(
+						'CyncClient: password login returned non-numeric userId=%s; LAN login code not generated.',
+						session.userId,
+					);
+				}
+			} else {
+				this.log.warn(
+					'CyncClient: password login response missing "authorize"; LAN login may be disabled.',
+				);
+			}
+
+			const next: CyncTokenData = {
+				userId: String(session.userId),
+				accessToken: access,
+				refreshToken: refresh,
+				expiresAt,
+				authorize,
+				lanLoginCode,
+			};
+
+			await this.tokenStore.save(next);
+			this.tokenData = next;
+			this.applyAccessToken(next);
+
+			this.log.info(
+				'CyncClient: obtained new token via password login; userId=%s expiresAt=%s',
+				next.userId,
+				next.expiresAt
+					? new Date(next.expiresAt).toISOString()
+					: 'unknown',
+			);
+
+			return next;
+		} catch (err) {
+			this.log.error(
+				'CyncClient: password-based background login failed: %o',
+				err,
+			);
+			return null;
+		}
+	}
+
 	// ### 🧩 LAN Update Bridge: allow platform to handle device updates
 	public onLanDeviceUpdate(handler: (update: unknown) => void): void {
 		this.lanUpdateHandler = handler;
@@ -323,8 +410,18 @@ export class CyncClient {
 	 */
 	// ### 🧩 Refresh Error Detector: identifies "Access-Token Expired" responses
 	private isAccessTokenExpiredError(err: unknown): boolean {
-		if (!err || typeof err !== 'object') {
+		if (!err) {
 			return false;
+		}
+
+		// Most common case: ConfigClient throws a plain Error('Access-Token Expired')
+		if (err instanceof Error) {
+			if (
+				err.message === 'Access-Token Expired' ||
+				err.message.includes('Access-Token Expired')
+			) {
+				return true;
+			}
 		}
 
 		type ErrorWithShape = {
@@ -338,54 +435,79 @@ export class CyncClient {
 
 		const e = err as ErrorWithShape;
 
-		// Shape we see in logs:
+		// Shape we see in raw HTTP JSON:
 		// { error: { msg: 'Access-Token Expired', code: 4031021 } }
-		if (e.error && (e.error.msg === 'Access-Token Expired' || e.error.code === 4031021)) {
+		if (
+			e.error &&
+			(e.error.msg === 'Access-Token Expired' || e.error.code === 4031021)
+		) {
 			return true;
 		}
 
-		// Fallback: generic 403 with message string
-		if (e.status === 403 && e.message && e.message.includes('Access-Token Expired')) {
+		// Fallback: generic 403 plus message text
+		if (
+			e.status === 403 &&
+			e.message &&
+			e.message.includes('Access-Token Expired')
+		) {
 			return true;
 		}
 
 		return false;
 	}
 
-	// ### 🧩 Token Refresh Helper: exchanges refreshToken for a new accessToken
-	private async refreshAccessToken(stored: CyncTokenData): Promise<CyncTokenData | null> {
-		if (!stored.refreshToken) {
+	// ### 🧩 Token Refresh Helper: exchanges refreshToken for a new accessToken, or falls back to password login
+	private async refreshAccessToken(
+		stored: CyncTokenData,
+	): Promise<CyncTokenData | null> {
+		// First, try refresh_token if we have one
+		if (stored.refreshToken) {
+			try {
+				const resp = await this.configClient.refreshAccessToken(
+					stored.refreshToken,
+				);
+
+				const next: CyncTokenData = {
+					...stored,
+					accessToken: resp.accessToken,
+					refreshToken: resp.refreshToken ?? stored.refreshToken,
+					expiresAt: resp.expiresAt ?? stored.expiresAt,
+				};
+
+				await this.tokenStore.save(next);
+				this.tokenData = next;
+				this.applyAccessToken(next);
+
+				this.log.info(
+					'CyncClient: refreshed access token for userId=%s; expiresAt=%s',
+					next.userId,
+					next.expiresAt
+						? new Date(next.expiresAt).toISOString()
+						: 'unknown',
+				);
+
+				return next;
+			} catch (err) {
+				this.log.error('CyncClient: token refresh failed: %o', err);
+				// fall through to password-based login below
+			}
+		} else {
 			this.log.warn(
-				'CyncClient: refreshAccessToken() called but no refreshToken is stored; cannot refresh.',
+				'CyncClient: refreshAccessToken() called but no refreshToken is stored; will attempt password-based login.',
+			);
+		}
+
+		// If we get here, either we had no refreshToken or refresh failed.
+		// Attempt a background username/password login to obtain a fresh token.
+		const viaPassword = await this.loginWithPasswordForToken();
+		if (!viaPassword) {
+			this.log.error(
+				'CyncClient: password-based background login failed; cannot refresh Cync token automatically.',
 			);
 			return null;
 		}
 
-		try {
-			const resp = await this.configClient.refreshAccessToken(stored.refreshToken);
-
-			const next: CyncTokenData = {
-				...stored,
-				accessToken: resp.accessToken,
-				refreshToken: resp.refreshToken ?? stored.refreshToken,
-				expiresAt: resp.expiresAt ?? stored.expiresAt,
-			};
-
-			await this.tokenStore.save(next);
-			this.tokenData = next;
-			this.applyAccessToken(next);
-
-			this.log.info(
-				'CyncClient: refreshed access token for userId=%s; expiresAt=%s',
-				next.userId,
-				next.expiresAt ? new Date(next.expiresAt).toISOString() : 'unknown',
-			);
-
-			return next;
-		} catch (err) {
-			this.log.error('CyncClient: token refresh failed: %o', err);
-			return null;
-		}
+		return viaPassword;
 	}
 
 	// ### 🧩 Cloud Config Wrapper: auto-refreshes access token

@@ -1,5 +1,18 @@
 # Changelog
 
+## v0.1.8
+
+**Release Date:** 2025-12-11
+
+### Added
+- Automatic background re-authentication using username/password when access tokens expire
+- Support for password-based login fallback when refresh tokens are unavailable
+- Improved handling of expired Cync cloud tokens without requiring Homebridge restarts
+
+### Fixed
+- Devices becoming unresponsive after Cync access token expiration
+- Cloud login failures caused by non-refreshable legacy tokens
+
 ## 0.1.7 – Token refresh & accessory polling
 
 **Release Date:** 2025-12-10

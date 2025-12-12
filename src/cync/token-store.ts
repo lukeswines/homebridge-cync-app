@@ -31,8 +31,9 @@ export class CyncTokenStore {
 			const raw = await fs.readFile(this.filePath, 'utf8');
 			const data = JSON.parse(raw) as CyncTokenData;
 
-			// If expiresAt is set and in the past, treat as invalid
-			if (data.expiresAt && data.expiresAt <= Date.now()) {
+			const now = Date.now();
+
+			if (typeof data.expiresAt === 'number' && data.expiresAt <= now) {
 				return null;
 			}
 

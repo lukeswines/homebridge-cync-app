@@ -1,0 +1,100 @@
+// src/cync/cync-switch-accessory.ts
+import type { PlatformAccessory } from 'homebridge';
+import type { CyncDevice, CyncDeviceMesh } from './config-client.js';
+import type { CyncAccessoryContext, CyncAccessoryEnv } from './cync-accessory-helpers.js';
+import { applyAccessoryInformationFromCyncDevice } from './cync-accessory-helpers.js';
+
+export function configureCyncSwitchAccessory(
+	env: CyncAccessoryEnv,
+	mesh: CyncDeviceMesh,
+	device: CyncDevice,
+	accessory: PlatformAccessory,
+	deviceName: string,
+	deviceId: string,
+): void {
+	const service =
+    accessory.getService(env.api.hap.Service.Switch) ||
+    accessory.addService(env.api.hap.Service.Switch, deviceName);
+
+	const existingLight = accessory.getService(env.api.hap.Service.Lightbulb);
+	if (existingLight) {
+		env.log.info(
+			'Cync: removing stale Lightbulb service from %s (deviceId=%s) before configuring as Switch',
+			deviceName,
+			deviceId,
+		);
+		accessory.removeService(existingLight);
+	}
+
+	applyAccessoryInformationFromCyncDevice(env.api, accessory, device, deviceName, deviceId);
+
+	// Ensure context is initialized
+	const ctx = accessory.context as CyncAccessoryContext;
+	ctx.cync = ctx.cync ?? {
+		meshId: mesh.id,
+		deviceId,
+		productId: device.product_id,
+		on: false,
+	};
+
+	// Remember mapping for LAN updates
+	env.registerAccessoryForDevice(deviceId, accessory);
+	env.markDeviceSeen(deviceId);
+	env.startPollingDevice(deviceId);
+
+	service
+		.getCharacteristic(env.api.hap.Characteristic.On)
+		.onGet(() => {
+			if (env.isDeviceProbablyOffline(deviceId)) {
+				throw new env.api.hap.HapStatusError(
+					env.api.hap.HAPStatus.SERVICE_COMMUNICATION_FAILURE,
+				);
+			}
+
+			const currentOn = !!ctx.cync?.on;
+			env.log.info(
+				'Cync: On.get -> %s for %s (deviceId=%s)',
+				String(currentOn),
+				deviceName,
+				deviceId,
+			);
+			return currentOn;
+		})
+		.onSet(async (value) => {
+			const cyncMeta = ctx.cync;
+
+			if (!cyncMeta?.deviceId) {
+				env.log.warn(
+					'Cync: Light On.set called for %s but no cync.deviceId in context',
+					deviceName,
+				);
+				return;
+			}
+
+			const on = value === true || value === 1;
+
+			env.log.info(
+				'Cync: Light On.set -> %s for %s (deviceId=%s)',
+				String(on),
+				deviceName,
+				cyncMeta.deviceId,
+			);
+
+			cyncMeta.on = on;
+
+			if (!on) {
+				// Off is always a plain power packet
+				await env.tcpClient.setSwitchState(cyncMeta.deviceId, { on: false });
+				return;
+			}
+
+			// Turning on:
+			// - If we were in color mode with a known RGB + brightness, restore color.
+			// - Otherwise, just send a basic power-on packet.
+			if (cyncMeta.colorActive && cyncMeta.rgb && typeof cyncMeta.brightness === 'number') {
+				await env.tcpClient.setColor(cyncMeta.deviceId, cyncMeta.rgb, cyncMeta.brightness);
+			} else {
+				await env.tcpClient.setSwitchState(cyncMeta.deviceId, { on: true });
+			}
+		});
+}

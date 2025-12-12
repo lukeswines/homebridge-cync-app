@@ -223,6 +223,119 @@ export class ConfigClient {
 			raw: json,
 		};
 	}
+
+	/**
+	 * Password-only login for background refresh.
+	 *
+	 * This uses the /user_auth endpoint (no two_factor) and is intended
+	 * for automatic re-auth when the access token has expired, after an
+	 * initial 2FA bootstrap has already been completed.
+	 */
+	public async loginWithPassword(
+		email: string,
+		password: string,
+	): Promise<CyncLoginSession & { refreshToken?: string; expiresAt?: number }> {
+		const url = `${CYNC_API_BASE}user_auth`;
+		this.log.debug('Logging into Cync with password-only auth for %s…', email);
+
+		const body = {
+			corp_id: CORP_ID,
+			email,
+			password,
+			resource: ConfigClient.randomLoginResource(),
+		};
+
+		const res = (await fetch(url, {
+			method: 'POST',
+			headers: {
+				'Content-Type': 'application/json',
+			},
+			body: JSON.stringify(body),
+		})) as HttpResponse;
+
+		const json: unknown = await res.json().catch(async () => {
+			const text = await res.text().catch(() => '');
+			throw new Error(`Cync password login returned non-JSON payload: ${text}`);
+		});
+
+		if (!res.ok) {
+			this.log.error(
+				'Cync password login failed: HTTP %d %s %o',
+				res.status,
+				res.statusText,
+				json,
+			);
+			const errBody = json as CyncErrorBody;
+			throw new Error(
+				errBody.error?.msg ??
+				`Cync password login failed with status ${res.status} ${res.statusText}`,
+			);
+		}
+
+		const obj = json as Record<string, unknown>;
+		this.log.debug('Cync password login response: keys=%o', Object.keys(obj));
+
+		const accessTokenRaw = obj.access_token ?? obj.accessToken;
+		const userIdRaw = obj.user_id ?? obj.userId;
+		const authorizeRaw = obj.authorize;
+		const refreshTokenRaw = obj.refresh_token ?? obj.refreshToken;
+		const expiresAtRaw = obj.expires_at ?? obj.expiresAt;
+
+		const accessToken =
+			typeof accessTokenRaw === 'string' && accessTokenRaw.length > 0
+				? accessTokenRaw
+				: undefined;
+
+		const userId =
+			userIdRaw !== undefined && userIdRaw !== null
+				? String(userIdRaw)
+				: undefined;
+
+		const authorize =
+			typeof authorizeRaw === 'string' && authorizeRaw.length > 0
+				? authorizeRaw
+				: undefined;
+
+		if (!accessToken || !userId) {
+			this.log.error(
+				'Cync password login missing access_token or user_id: %o',
+				json,
+			);
+			throw new Error(
+				'Cync password login response missing access_token or user_id',
+			);
+		}
+
+		let refreshToken: string | undefined;
+		if (typeof refreshTokenRaw === 'string' && refreshTokenRaw.length > 0) {
+			refreshToken = refreshTokenRaw;
+		}
+
+		let expiresAt: number | undefined;
+		if (typeof expiresAtRaw === 'number') {
+			expiresAt = expiresAtRaw;
+		}
+
+		this.accessToken = accessToken;
+		this.userId = userId;
+		this.authorize = authorize ?? null;
+
+		this.log.info('Cync password login successful; userId=%s', userId);
+
+		return {
+			accessToken,
+			userId,
+			authorize,
+			raw: {
+				...obj,
+				refreshToken,
+				expiresAt,
+			},
+			refreshToken,
+			expiresAt,
+		};
+	}
+
 	/**
 	 * Refresh the access token using a stored refresh token.
 	 *

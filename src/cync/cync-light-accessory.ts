@@ -1,0 +1,359 @@
+// src/cync/cync-light-accessory.ts
+import type { PlatformAccessory } from 'homebridge';
+import type { CyncDevice, CyncDeviceMesh } from './config-client.js';
+import type { CyncAccessoryContext, CyncAccessoryEnv } from './cync-accessory-helpers.js';
+import { applyAccessoryInformationFromCyncDevice, hsvToRgb } from './cync-accessory-helpers.js';
+
+export function configureCyncLightAccessory(
+	env: CyncAccessoryEnv,
+	mesh: CyncDeviceMesh,
+	device: CyncDevice,
+	accessory: PlatformAccessory,
+	deviceName: string,
+	deviceId: string,
+): void {
+	// If this accessory used to be a switch, remove that service
+	const existingSwitch = accessory.getService(env.api.hap.Service.Switch);
+	if (existingSwitch) {
+		env.log.info(
+			'Cync: removing stale Switch service from %s (deviceId=%s) before configuring as Lightbulb',
+			deviceName,
+			deviceId,
+		);
+		accessory.removeService(existingSwitch);
+	}
+
+	const service =
+    accessory.getService(env.api.hap.Service.Lightbulb) ||
+    accessory.addService(env.api.hap.Service.Lightbulb, deviceName);
+
+	// Optionally update accessory category so UIs treat it as a light
+	if (accessory.category !== env.api.hap.Categories.LIGHTBULB) {
+		accessory.category = env.api.hap.Categories.LIGHTBULB;
+	}
+
+	// Populate Accessory Information from Cync metadata
+	applyAccessoryInformationFromCyncDevice(env.api, accessory, device, deviceName, deviceId);
+
+	// Ensure context is initialized
+	const ctx = accessory.context as CyncAccessoryContext;
+	ctx.cync = ctx.cync ?? {
+		meshId: mesh.id,
+		deviceId,
+		productId: device.product_id,
+		on: false,
+	};
+
+	// Remember mapping for LAN updates
+	env.registerAccessoryForDevice(deviceId, accessory);
+	env.markDeviceSeen(deviceId);
+	env.startPollingDevice(deviceId);
+
+	const Characteristic = env.api.hap.Characteristic;
+
+	// ----- On/Off -----
+	service
+		.getCharacteristic(Characteristic.On)
+		.onGet(() => {
+			if (env.isDeviceProbablyOffline(deviceId)) {
+				throw new env.api.hap.HapStatusError(
+					env.api.hap.HAPStatus.SERVICE_COMMUNICATION_FAILURE,
+				);
+			}
+
+			const currentOn = !!ctx.cync?.on;
+			env.log.info(
+				'Cync: Light On.get -> %s for %s (deviceId=%s)',
+				String(currentOn),
+				deviceName,
+				deviceId,
+			);
+			return currentOn;
+		})
+		.onSet(async (value) => {
+			const cyncMeta = ctx.cync;
+
+			if (!cyncMeta?.deviceId) {
+				env.log.warn(
+					'Cync: Light On.set called for %s but no cync.deviceId in context',
+					deviceName,
+				);
+				return;
+			}
+
+			const on = value === true || value === 1;
+
+			env.log.info(
+				'Cync: Light On.set -> %s for %s (deviceId=%s)',
+				String(on),
+				deviceName,
+				cyncMeta.deviceId,
+			);
+
+			// Optimistic local cache; LAN update will confirm
+			cyncMeta.on = on;
+
+			try {
+				await env.tcpClient.setSwitchState(cyncMeta.deviceId, { on });
+				env.markDeviceSeen(cyncMeta.deviceId);
+			} catch (err) {
+				env.log.warn(
+					'Cync: Light On.set failed for %s (deviceId=%s): %s',
+					deviceName,
+					cyncMeta.deviceId,
+					(err as Error).message ?? String(err),
+				);
+
+				throw new env.api.hap.HapStatusError(
+					env.api.hap.HAPStatus.SERVICE_COMMUNICATION_FAILURE,
+				);
+			}
+		});
+
+	// ----- Brightness (dimming via LAN combo_control) -----
+	service
+		.getCharacteristic(Characteristic.Brightness)
+		.onGet(() => {
+			if (env.isDeviceProbablyOffline(deviceId)) {
+				throw new env.api.hap.HapStatusError(
+					env.api.hap.HAPStatus.SERVICE_COMMUNICATION_FAILURE,
+				);
+			}
+
+			const current = ctx.cync?.brightness;
+
+			// If we have a cached LAN level, use it; otherwise infer from On.
+			if (typeof current === 'number') {
+				return current;
+			}
+
+			const on = ctx.cync?.on ?? false;
+			return on ? 100 : 0;
+		})
+		.onSet(async (value) => {
+			const cyncMeta = ctx.cync;
+
+			if (!cyncMeta?.deviceId) {
+				env.log.warn(
+					'Cync: Light Brightness.set called for %s but no cync.deviceId in context',
+					deviceName,
+				);
+				return;
+			}
+
+			const brightness = Math.max(0, Math.min(100, Number(value)));
+
+			if (!Number.isFinite(brightness)) {
+				env.log.warn(
+					'Cync: Light Brightness.set received invalid value=%o for %s (deviceId=%s)',
+					value,
+					deviceName,
+					cyncMeta.deviceId,
+				);
+				return;
+			}
+
+			// Optimistic cache
+			cyncMeta.brightness = brightness;
+			cyncMeta.on = brightness > 0;
+
+			env.log.info(
+				'Cync: Light Brightness.set -> %d for %s (deviceId=%s)',
+				brightness,
+				deviceName,
+				cyncMeta.deviceId,
+			);
+
+			try {
+				// If we're in "color mode", keep the existing RGB and scale brightness via setColor();
+				// otherwise treat this as a white-brightness change.
+				if (cyncMeta.colorActive && cyncMeta.rgb) {
+					await env.tcpClient.setColor(
+						cyncMeta.deviceId,
+						cyncMeta.rgb,
+						brightness,
+					);
+				} else {
+					await env.tcpClient.setBrightness(cyncMeta.deviceId, brightness);
+				}
+
+				env.markDeviceSeen(cyncMeta.deviceId);
+			} catch (err) {
+				env.log.warn(
+					'Cync: Light Brightness.set failed for %s (deviceId=%s): %s',
+					deviceName,
+					cyncMeta.deviceId,
+					(err as Error).message ?? String(err),
+				);
+
+				throw new env.api.hap.HapStatusError(
+					env.api.hap.HAPStatus.SERVICE_COMMUNICATION_FAILURE,
+				);
+			}
+		});
+
+	// ----- Hue -----
+	service
+		.getCharacteristic(Characteristic.Hue)
+		.onGet(() => {
+			if (env.isDeviceProbablyOffline(deviceId)) {
+				throw new env.api.hap.HapStatusError(
+					env.api.hap.HAPStatus.SERVICE_COMMUNICATION_FAILURE,
+				);
+			}
+
+			const hue = ctx.cync?.hue;
+			if (typeof hue === 'number') {
+				return hue;
+			}
+			// Default to 0° (red) if we have no color history
+			return 0;
+		})
+		.onSet(async (value) => {
+			const cyncMeta = ctx.cync;
+
+			if (!cyncMeta?.deviceId) {
+				env.log.warn(
+					'Cync: Light Hue.set called for %s but no cync.deviceId in context',
+					deviceName,
+				);
+				return;
+			}
+
+			const hue = Math.max(0, Math.min(360, Number(value)));
+			if (!Number.isFinite(hue)) {
+				env.log.warn(
+					'Cync: Light Hue.set received invalid value=%o for %s (deviceId=%s)',
+					value,
+					deviceName,
+					cyncMeta.deviceId,
+				);
+				return;
+			}
+
+			// Use cached saturation/brightness if available, otherwise sane defaults
+			const saturation =
+        typeof cyncMeta.saturation === 'number' ? cyncMeta.saturation : 100;
+
+			const brightness =
+        typeof cyncMeta.brightness === 'number' ? cyncMeta.brightness : 100;
+
+			const rgb = hsvToRgb(hue, saturation, brightness);
+
+			// Optimistic cache
+			cyncMeta.hue = hue;
+			cyncMeta.saturation = saturation;
+			cyncMeta.rgb = rgb;
+			cyncMeta.colorActive = true;
+			cyncMeta.on = brightness > 0;
+			cyncMeta.brightness = brightness;
+
+			env.log.info(
+				'Cync: Light Hue.set -> %d for %s (deviceId=%s) -> rgb=(%d,%d,%d) brightness=%d',
+				hue,
+				deviceName,
+				cyncMeta.deviceId,
+				rgb.r,
+				rgb.g,
+				rgb.b,
+				brightness,
+			);
+
+			try {
+				await env.tcpClient.setColor(cyncMeta.deviceId, rgb, brightness);
+				env.markDeviceSeen(cyncMeta.deviceId);
+			} catch (err) {
+				env.log.warn(
+					'Cync: Light Hue.set failed for %s (deviceId=%s): %s',
+					deviceName,
+					cyncMeta.deviceId,
+					(err as Error).message ?? String(err),
+				);
+
+				throw new env.api.hap.HapStatusError(
+					env.api.hap.HAPStatus.SERVICE_COMMUNICATION_FAILURE,
+				);
+			}
+		});
+
+	// ----- Saturation -----
+	service
+		.getCharacteristic(Characteristic.Saturation)
+		.onGet(() => {
+			if (env.isDeviceProbablyOffline(deviceId)) {
+				throw new env.api.hap.HapStatusError(
+					env.api.hap.HAPStatus.SERVICE_COMMUNICATION_FAILURE,
+				);
+			}
+
+			const sat = ctx.cync?.saturation;
+			if (typeof sat === 'number') {
+				return sat;
+			}
+			return 100;
+		})
+		.onSet(async (value) => {
+			const cyncMeta = ctx.cync;
+
+			if (!cyncMeta?.deviceId) {
+				env.log.warn(
+					'Cync: Light Saturation.set called for %s but no cync.deviceId in context',
+					deviceName,
+				);
+				return;
+			}
+
+			const saturation = Math.max(0, Math.min(100, Number(value)));
+			if (!Number.isFinite(saturation)) {
+				env.log.warn(
+					'Cync: Light Saturation.set received invalid value=%o for %s (deviceId=%s)',
+					value,
+					deviceName,
+					cyncMeta.deviceId,
+				);
+				return;
+			}
+
+			const hue = typeof cyncMeta.hue === 'number' ? cyncMeta.hue : 0;
+
+			const brightness =
+        typeof cyncMeta.brightness === 'number' ? cyncMeta.brightness : 100;
+
+			const rgb = hsvToRgb(hue, saturation, brightness);
+
+			// Optimistic cache
+			cyncMeta.hue = hue;
+			cyncMeta.saturation = saturation;
+			cyncMeta.rgb = rgb;
+			cyncMeta.colorActive = true;
+			cyncMeta.on = brightness > 0;
+			cyncMeta.brightness = brightness;
+
+			env.log.info(
+				'Cync: Light Saturation.set -> %d for %s (deviceId=%s) -> rgb=(%d,%d,%d) brightness=%d',
+				saturation,
+				deviceName,
+				cyncMeta.deviceId,
+				rgb.r,
+				rgb.g,
+				rgb.b,
+				brightness,
+			);
+
+			try {
+				await env.tcpClient.setColor(cyncMeta.deviceId, rgb, brightness);
+				env.markDeviceSeen(cyncMeta.deviceId);
+			} catch (err) {
+				env.log.warn(
+					'Cync: Light Saturation.set failed for %s (deviceId=%s): %s',
+					deviceName,
+					cyncMeta.deviceId,
+					(err as Error).message ?? String(err),
+				);
+
+				throw new env.api.hap.HapStatusError(
+					env.api.hap.HAPStatus.SERVICE_COMMUNICATION_FAILURE,
+				);
+			}
+		});
+}
