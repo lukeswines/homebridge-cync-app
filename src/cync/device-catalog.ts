@@ -30,22 +30,27 @@ export const DEVICE_CATALOG: Record<number, CyncDeviceModel> = {
 		marketingName: 'Cync reveal HD+',
 		// defaultCategory: Categories.LIGHTBULB,
 	},
+	// Legacy C by GE On/Off Smart Plug — original hardware
 	64: {
 		deviceType: 64,
-		modelName: 'Indoor Smart Plug',
-		marketingName: 'On/Off Smart Plug',
+		modelName: 'Indoor Smart Plug (CPLGSTDBLW1)',
+		marketingName: 'On/Off Smart Plug (CPLGSTDBLW1)',
+		notes: 'Legacy C by GE plug. FCC ID PUU-CPLGSTDBLW1. Original hardware revision. Final firmware 1.x.',
 		// defaultCategory: Categories.OUTLET,
 	},
+	// Legacy C by GE On/Off Smart Plug — revised hardware ("T" revision)
 	65: {
 		deviceType: 65,
-		modelName: 'Indoor Smart Plug',
-		marketingName: 'Cync Indoor Plug',
+		modelName: 'Indoor Smart Plug (CPLGSTDBLW1-T)',
+		marketingName: 'On/Off Smart Plug (CPLGSTDBLW1-T)',
+		notes: 'Legacy C by GE plug. FCC ID PUU-CPLGSTDBLW1T / HVIN CPLGSTDBLW1T. Revised hardware. Final firmware 2.x.',
 		// defaultCategory: Categories.OUTLET,
 	},
 	172: {
 		deviceType: 172,
 		modelName: 'Indoor Smart Plug (3in1)',
 		marketingName: 'Cync Indoor Smart Plug',
+		notes: 'Matter-capable hardware. Replaces legacy C by GE On/Off Smart Plug.',
 		// defaultCategory: Categories.OUTLET,
 	},
 };

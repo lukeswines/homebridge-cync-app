@@ -14,7 +14,11 @@ const defaultLogger: CyncLogger = {
 export type DeviceUpdateCallback = (payload: unknown) => void;
 export type RawFrameListener = (frame: Buffer) => void;
 
+type TransportMode = 'tls_strict' | 'tls_relaxed' | 'tcp';
+
 export class TcpClient {
+	private transportMode: TransportMode | null = null;
+
 	public registerSwitchMapping(controllerId: number, deviceId: string): void {
 		if (!Number.isFinite(controllerId)) {
 			return;
@@ -38,6 +42,10 @@ export class TcpClient {
 	private heartbeatTimer: NodeJS.Timeout | null = null;
 	private rawFrameListeners: RawFrameListener[] = [];
 	private controllerToDevice = new Map<number, string>();
+	private reconnectTimer: NodeJS.Timeout | null = null;
+	private reconnectAttempt = 0;
+	private connectInFlight: Promise<void> | null = null;
+	private shuttingDown = false;
 
 	private enqueueCommand<T>(fn: () => Promise<T>): Promise<T> {
 		let resolveWrapper: (value: T | PromiseLike<T>) => void;
@@ -159,6 +167,7 @@ export class TcpClient {
 		loginCode: Uint8Array,
 		config: CyncCloudConfig,
 	): Promise<void> {
+		this.shuttingDown = false;
 		this.loginCode = loginCode;
 		this.config = config;
 
@@ -168,10 +177,6 @@ export class TcpClient {
 			);
 			return;
 		}
-
-		// Optional eager connect at startup; failures are logged and we rely
-		// on ensureConnected() to reconnect on demand later.
-		await this.ensureConnected();
 	}
 
 	public applyLanTopology(topology: {
@@ -201,14 +206,53 @@ export class TcpClient {
 		}
 
 		if (!this.loginCode || !this.loginCode.length || !this.config) {
-			this.log.warn(
-				'[Cync TCP] ensureConnected() called without loginCode/config; cannot open socket.',
-			);
+			this.log.warn('[Cync TCP] ensureConnected() called without loginCode/config; cannot open socket.');
 			return false;
 		}
 
-		await this.establishSocket();
+		if (this.connectInFlight) {
+			await this.connectInFlight;
+			return !!(this.socket && !this.socket.destroyed);
+		}
+
+		this.connectInFlight = this.establishSocket()
+			.finally(() => {
+				this.connectInFlight = null;
+			});
+
+		await this.connectInFlight;
 		return !!(this.socket && !this.socket.destroyed);
+	}
+
+	private scheduleReconnect(reason: string): void {
+		if (this.shuttingDown) {
+			this.log.debug('[Cync TCP] Not scheduling reconnect (shutting down): %s', reason);
+			return;
+		}
+
+		if (this.reconnectTimer) {
+			return;
+		}
+
+		if (!this.loginCode || !this.loginCode.length || !this.config) {
+			return;
+		}
+
+		const attempt = this.reconnectAttempt;
+		const delayMs = Math.min(30_000, 1_000 * Math.pow(2, attempt));
+		this.reconnectAttempt++;
+
+		this.log.debug('[Cync TCP] Scheduling reconnect in %dms (%s)', delayMs, reason);
+
+		this.reconnectTimer = setTimeout(() => {
+			this.reconnectTimer = null;
+
+			// Fire and forget; ensureConnected() logs failures already
+			void this.ensureConnected().catch((err: unknown) => {
+				this.log.debug('[Cync TCP] Reconnect attempt failed: %s', String(err));
+				this.scheduleReconnect('retry');
+			});
+		}, delayMs);
 	}
 
 	private async establishSocket(): Promise<void> {
@@ -219,34 +263,36 @@ export class TcpClient {
 		this.log.info('[Cync TCP] Connecting to %s…', host);
 
 		let socket: net.Socket | null = null;
-
+		if (this.socket) {
+			this.cleanupSocket(this.socket);
+			this.socket.destroy();
+			this.socket = null;
+		}
 		try {
-			// 1. Try strict TLS
-			try {
-				socket = await this.openTlsSocket(host, portTLS, true);
-			} catch (e1) {
-				this.log.warn('[Cync TCP] TLS strict failed, trying relaxed TLS…');
+			// If we already learned the best mode, reuse it.
+			if (this.transportMode === 'tls_relaxed') {
+				socket = await this.openTlsSocket(host, portTLS, false);
+			} else if (this.transportMode === 'tcp') {
+				socket = await this.openTcpSocket(host, portTCP);
+			} else {
+				// Default path: strict once, then downgrade and remember.
 				try {
-					socket = await this.openTlsSocket(host, portTLS, false);
-				} catch (e2) {
-					this.log.warn(
-						'[Cync TCP] TLS relaxed failed, falling back to plain TCP…',
-					);
-					socket = await this.openTcpSocket(host, portTCP);
+					socket = await this.openTlsSocket(host, portTLS, true);
+					this.transportMode = 'tls_strict';
+				} catch {
+					this.log.debug('[Cync TCP] TLS strict failed; trying relaxed TLS…');
+					try {
+						socket = await this.openTlsSocket(host, portTLS, false);
+						this.transportMode = 'tls_relaxed';
+					} catch {
+						this.log.debug('[Cync TCP] TLS relaxed failed; falling back to plain TCP…');
+						socket = await this.openTcpSocket(host, portTCP);
+						this.transportMode = 'tcp';
+					}
 				}
 			}
 		} catch (err) {
-			this.log.error(
-				'[Cync TCP] Failed to connect to %s: %s',
-				host,
-				String(err),
-			);
-			this.socket = null;
-			return;
-		}
-
-		if (!socket) {
-			this.log.error('[Cync TCP] Socket is null after connect attempts.');
+			this.log.error('[Cync TCP] Failed to connect to %s: %s', host, String(err));
 			this.socket = null;
 			return;
 		}
@@ -254,41 +300,68 @@ export class TcpClient {
 		this.socket = socket;
 		this.attachSocketListeners(this.socket);
 
-		// Send loginCode immediately, as HA does.
 		if (this.loginCode && this.loginCode.length > 0) {
 			this.socket.write(Buffer.from(this.loginCode));
-			this.log.info(
-				'[Cync TCP] Login code sent (%d bytes).',
-				this.loginCode.length,
-			);
+			this.log.info('[Cync TCP] Login code sent (%d bytes).', this.loginCode.length);
 		} else {
-			this.log.warn(
-				'[Cync TCP] establishSocket() reached with no loginCode; skipping auth write.',
-			);
+			this.log.warn('[Cync TCP] establishSocket() reached with no loginCode; skipping auth write.');
 		}
 
-		// Start heartbeat: every 180 seconds send d3 00 00 00 00
 		this.startHeartbeat();
+		this.reconnectAttempt = 0;
+		if (this.reconnectTimer) {
+			clearTimeout(this.reconnectTimer);
+			this.reconnectTimer = null;
+		}
+	}
+
+	private cleanupSocket(sock: net.Socket | null): void {
+		if (!sock) {
+			return;
+		}
+
+		sock.removeAllListeners('data');
+		sock.removeAllListeners('close');
+		sock.removeAllListeners('error');
+
+		// Note: caller decides whether to destroy()
 	}
 
 	private openTlsSocket(host: string, port: number, strict: boolean): Promise<net.Socket> {
 		return new Promise((resolve, reject) => {
-			const sock = tls.connect(
-				{
-					host,
-					port,
-					rejectUnauthorized: strict,
-				},
-				() => resolve(sock),
-			);
-			sock.once('error', reject);
+			const sock = tls.connect({ host, port, rejectUnauthorized: strict });
+
+			const onError = (err: Error) => {
+				// 'secureConnect' is registered with once(); no need to remove it here.
+				reject(err);
+			};
+
+			const onSecure = () => {
+				sock.removeListener('error', onError);
+				resolve(sock);
+			};
+
+			sock.once('error', onError);
+			sock.once('secureConnect', onSecure);
 		});
 	}
 
 	private openTcpSocket(host: string, port: number): Promise<net.Socket> {
 		return new Promise((resolve, reject) => {
-			const sock = net.createConnection({ host, port }, () => resolve(sock));
-			sock.once('error', reject);
+			const sock = net.createConnection({ host, port });
+
+			const onError = (err: Error) => {
+				// 'connect' is registered with once(); no need to remove it here.
+				reject(err);
+			};
+
+			const onConnect = () => {
+				sock.removeListener('error', onError);
+				resolve(sock);
+			};
+
+			sock.once('error', onError);
+			sock.once('connect', onConnect);
 		});
 	}
 
@@ -418,11 +491,21 @@ export class TcpClient {
 	}
 	public async disconnect(): Promise<void> {
 		this.log.info('[Cync TCP] disconnect() called.');
+		this.shuttingDown = true;
+
+		if (this.reconnectTimer) {
+			clearTimeout(this.reconnectTimer);
+			this.reconnectTimer = null;
+		}
+		this.reconnectAttempt = 0;
+
 		if (this.heartbeatTimer) {
 			clearInterval(this.heartbeatTimer);
 			this.heartbeatTimer = null;
 		}
+
 		if (this.socket) {
+			this.cleanupSocket(this.socket);
 			this.socket.destroy();
 			this.socket = null;
 		}
@@ -674,13 +757,30 @@ export class TcpClient {
 
 		socket.on('close', () => {
 			this.log.warn('[Cync TCP] Socket closed.');
-			this.socket = null;
+
+			if (this.heartbeatTimer) {
+				clearInterval(this.heartbeatTimer);
+				this.heartbeatTimer = null;
+			}
+
+			this.cleanupSocket(socket);
+			if (this.socket === socket) {
+				this.socket = null;
+			}
+
+			this.reconnectAttempt = 0;
+
+			if (this.reconnectTimer) {
+				clearTimeout(this.reconnectTimer);
+				this.reconnectTimer = null;
+			}
 		});
 
 		socket.on('error', (err) => {
 			this.log.error('[Cync TCP] Socket error:', String(err));
 		});
 	}
+
 
 	private processIncoming(): void {
 		while (this.readBuffer.length >= 5) {
@@ -736,7 +836,7 @@ export class TcpClient {
 		);
 	}
 
-	// ### 🧩 Incoming Frame Handler: routes LAN messages to raw + parsed callbacks
+	// Incoming Frame Handler: routes LAN messages to raw + parsed callbacks
 	private handleIncomingFrame(frame: Buffer, type: number): void {
 		// Fan out raw frame to higher layers (CyncClient) for debugging
 		for (const listener of this.rawFrameListeners) {

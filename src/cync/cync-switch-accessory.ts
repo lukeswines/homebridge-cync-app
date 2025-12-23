@@ -45,19 +45,25 @@ export function configureCyncSwitchAccessory(
 	service
 		.getCharacteristic(env.api.hap.Characteristic.On)
 		.onGet(() => {
+			const currentOn = !!ctx.cync?.on;
+
 			if (env.isDeviceProbablyOffline(deviceId)) {
-				throw new env.api.hap.HapStatusError(
-					env.api.hap.HAPStatus.SERVICE_COMMUNICATION_FAILURE,
+				env.log.debug(
+					'Cync: Switch On.get offline-heuristic hit; returning cached=%s for %s (deviceId=%s)',
+					String(currentOn),
+					deviceName,
+					deviceId,
 				);
+				return currentOn;
 			}
 
-			const currentOn = !!ctx.cync?.on;
 			env.log.info(
 				'Cync: On.get -> %s for %s (deviceId=%s)',
 				String(currentOn),
 				deviceName,
 				deviceId,
 			);
+
 			return currentOn;
 		})
 		.onSet(async (value) => {
@@ -65,7 +71,7 @@ export function configureCyncSwitchAccessory(
 
 			if (!cyncMeta?.deviceId) {
 				env.log.warn(
-					'Cync: Light On.set called for %s but no cync.deviceId in context',
+					'Cync: Switch On.set called for %s but no cync.deviceId in context',
 					deviceName,
 				);
 				return;
@@ -74,27 +80,40 @@ export function configureCyncSwitchAccessory(
 			const on = value === true || value === 1;
 
 			env.log.info(
-				'Cync: Light On.set -> %s for %s (deviceId=%s)',
+				'Cync: Switch On.set -> %s for %s (deviceId=%s)',
 				String(on),
 				deviceName,
 				cyncMeta.deviceId,
 			);
 
+			// Optimistic cache
 			cyncMeta.on = on;
 
-			if (!on) {
-				// Off is always a plain power packet
-				await env.tcpClient.setSwitchState(cyncMeta.deviceId, { on: false });
-				return;
-			}
+			try {
+				if (!on) {
+					await env.tcpClient.setSwitchState(cyncMeta.deviceId, { on: false });
+					env.markDeviceSeen(cyncMeta.deviceId);
+					return;
+				}
 
-			// Turning on:
-			// - If we were in color mode with a known RGB + brightness, restore color.
-			// - Otherwise, just send a basic power-on packet.
-			if (cyncMeta.colorActive && cyncMeta.rgb && typeof cyncMeta.brightness === 'number') {
-				await env.tcpClient.setColor(cyncMeta.deviceId, cyncMeta.rgb, cyncMeta.brightness);
-			} else {
-				await env.tcpClient.setSwitchState(cyncMeta.deviceId, { on: true });
+				if (cyncMeta.colorActive && cyncMeta.rgb && typeof cyncMeta.brightness === 'number') {
+					await env.tcpClient.setColor(cyncMeta.deviceId, cyncMeta.rgb, cyncMeta.brightness);
+				} else {
+					await env.tcpClient.setSwitchState(cyncMeta.deviceId, { on: true });
+				}
+
+				env.markDeviceSeen(cyncMeta.deviceId);
+			} catch (err) {
+				env.log.warn(
+					'Cync: Switch On.set failed for %s (deviceId=%s): %s',
+					deviceName,
+					cyncMeta.deviceId,
+					(err as Error).message ?? String(err),
+				);
+
+				throw new env.api.hap.HapStatusError(
+					env.api.hap.HAPStatus.SERVICE_COMMUNICATION_FAILURE,
+				);
 			}
 		});
 }

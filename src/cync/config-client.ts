@@ -28,6 +28,38 @@ type CyncErrorBody = {
 	[key: string]: unknown;
 };
 
+type CyncApiError = {
+	status: number;
+	statusText: string;
+	body: unknown;
+	code?: number;
+	msg?: string;
+};
+
+function extractCyncError(body: unknown): { code?: number; msg?: string } {
+	if (!body || typeof body !== 'object') {
+		return {};
+	}
+
+	const obj = body as Record<string, unknown>;
+	const err = obj.error;
+
+	if (!err || typeof err !== 'object') {
+		return {};
+	}
+
+	const e = err as Record<string, unknown>;
+	const code = typeof e.code === 'number' ? e.code : undefined;
+	const msg = typeof e.msg === 'string' ? e.msg : undefined;
+
+	return { code, msg };
+}
+
+function isDevicePropertyNotExists(status: number, body: unknown): boolean {
+	const { code, msg } = extractCyncError(body);
+	return status === 404 && (code === 4041009 || msg === 'device property not exists');
+}
+
 export interface CyncLoginSession {
 	accessToken: string;
 	userId: string;
@@ -525,19 +557,37 @@ export class ConfigClient {
 		});
 
 		if (!res.ok) {
-			this.log.error(
-				'Cync properties call failed: HTTP %d %s %o',
-				res.status,
-				res.statusText,
-				json,
-			);
-			const errBody = json as CyncErrorBody;
-			const msg =
-				errBody.error?.msg ?? `Cync properties failed with ${res.status}`;
-			throw new Error(msg);
+			const { code, msg } = extractCyncError(json);
+			const outMsg = msg ?? `Cync properties failed with ${res.status}`;
+
+			if (isDevicePropertyNotExists(res.status, json)) {
+				this.log.debug(
+					'Cync properties call failed (expected): HTTP %d %s code=%s msg=%s',
+					res.status,
+					res.statusText,
+					code !== undefined ? String(code) : 'unknown',
+					outMsg,
+				);
+			} else {
+				this.log.error(
+					'Cync properties call failed: HTTP %d %s %o',
+					res.status,
+					res.statusText,
+					json,
+				);
+			}
+
+			const e: CyncApiError = {
+				status: res.status,
+				statusText: res.statusText,
+				body: json,
+				code,
+				msg: outMsg,
+			};
+
+			throw e;
 		}
 
-		// We keep this as a loose record; callers can shape it as needed.
 		return json as Record<string, unknown>;
 	}
 
@@ -559,7 +609,7 @@ export class ConfigClient {
 			throw new Error('Cync session not initialised. Call loginWithTwoFactor() first.');
 		}
 	}
-	// ### 🧩 LAN Login Blob Builder: Generates the auth_code payload used by Cync LAN TCP
+	// LAN Login Blob Builder: Generates the auth_code payload used by Cync LAN TCP
 	public static buildLanLoginCode(userId: string, authorize: string): Uint8Array {
 		const authBytes = Buffer.from(authorize, 'ascii');
 		const lengthByte = 10 + authBytes.length;

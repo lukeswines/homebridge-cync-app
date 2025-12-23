@@ -223,11 +223,11 @@ export function applyAccessoryInformationFromCyncDevice(
 
 	infoService.updateCharacteristic(Characteristic.SerialNumber, serial);
 
-	// Firmware revision, if present
+	// Firmware / Software revision
 	if (typeof rawDevice.firmwareVersion === 'string' && rawDevice.firmwareVersion.trim().length > 0) {
-		infoService.updateCharacteristic(
-			Characteristic.FirmwareRevision,
-			rawDevice.firmwareVersion.trim(),
-		);
+		const rev = rawDevice.firmwareVersion.trim();
+
+		infoService.updateCharacteristic(Characteristic.FirmwareRevision, rev);
+		infoService.updateCharacteristic(Characteristic.SoftwareRevision, rev);
 	}
 }

@@ -28,15 +28,48 @@ export class CyncClient {
 	private readonly log: CyncLogger;
 	private readonly configClient: ConfigClient;
 	private readonly tcpClient: TcpClient;
-
+	private readonly unsupportedPropertiesProductIds = new Set<string>();
 	private readonly tokenStore: CyncTokenStore;
 	private tokenData: CyncTokenData | null = null;
+	private isDevicePropertyNotExistsError(err: unknown): boolean {
+		if (!err) {
+			return false;
+		}
 
+		type ErrorWithShape = {
+			status?: number;
+			error?: {
+				code?: number;
+				msg?: string;
+			};
+			message?: string;
+		};
+
+		const e = err as ErrorWithShape;
+
+		// Observed cloud response:
+		// HTTP 404 Not Found { error: { msg: 'device property not exists', code: 4041009 } }
+		if (e.status === 404 && e.error?.code === 4041009) {
+			return true;
+		}
+
+		// Fallback (if shape changes or gets wrapped)
+		if (e.message && e.message.includes('device property not exists')) {
+			return true;
+		}
+
+		return false;
+	}
+
+	private formatMeshLabel(mesh: { name?: string | null; id: string | number }): string {
+		const rawName = typeof mesh.name === 'string' ? mesh.name.trim() : '';
+		return rawName.length > 0 ? rawName : `No Name (id=${String(mesh.id)})`;
+	}
 	// Populated after successful login.
 	private session: CyncLoginSession | null = null;
 	private cloudConfig: CyncCloudConfig | null = null;
 
-	// ### 🧩 LAN Topology Cache: mirrors HA's home_devices / home_controllers / switchID_to_homeID
+	// LAN Topology Cache: mirrors HA's home_devices / home_controllers / switchID_to_homeID
 	private homeDevices: Record<string, string[]> = {};
 	private homeControllers: Record<string, number[]> = {};
 	private switchIdToHomeId: Record<number, string> = {};
@@ -52,7 +85,7 @@ export class CyncClient {
 	// Optional LAN update hook for the platform
 	private lanUpdateHandler: ((update: unknown) => void) | null = null;
 
-	// ### 🧩 Password Login Helper: background username/password login for new tokens
+	// Password Login Helper: background username/password login for new tokens
 	private async loginWithPasswordForToken(): Promise<CyncTokenData | null> {
 		const { username, password } = this.loginConfig;
 
@@ -139,12 +172,12 @@ export class CyncClient {
 		}
 	}
 
-	// ### 🧩 LAN Update Bridge: allow platform to handle device updates
+	// LAN Update Bridge: allow platform to handle device updates
 	public onLanDeviceUpdate(handler: (update: unknown) => void): void {
 		this.lanUpdateHandler = handler;
 	}
 
-	// ### 🧩 LAN Auth Blob Getter: Returns the LAN login code if available
+	// LAN Auth Blob Getter: Returns the LAN login code if available
 	public getLanLoginCode(): Uint8Array {
 		if (!this.tokenData?.lanLoginCode) {
 			this.log.debug('CyncClient: getLanLoginCode() → no LAN blob in token store.');
@@ -184,7 +217,7 @@ export class CyncClient {
 		);
 	}
 
-	// ### 🧩 LAN Login Code Builder
+	// LAN Login Code Builder
 	private buildLanLoginCode(authorize: string, userId: number): Uint8Array {
 		const authorizeBytes = Buffer.from(authorize, 'ascii');
 
@@ -408,7 +441,7 @@ export class CyncClient {
 	 *   // user reads email, gets code…
 	 *   await client.submitTwoFactor(username, password, code); // completes login
 	 */
-	// ### 🧩 Refresh Error Detector: identifies "Access-Token Expired" responses
+	// Refresh Error Detector: identifies "Access-Token Expired" responses
 	private isAccessTokenExpiredError(err: unknown): boolean {
 		if (!err) {
 			return false;
@@ -456,7 +489,7 @@ export class CyncClient {
 		return false;
 	}
 
-	// ### 🧩 Token Refresh Helper: exchanges refreshToken for a new accessToken, or falls back to password login
+	// Token Refresh Helper: exchanges refreshToken for a new accessToken, or falls back to password login
 	private async refreshAccessToken(
 		stored: CyncTokenData,
 	): Promise<CyncTokenData | null> {
@@ -510,7 +543,7 @@ export class CyncClient {
 		return viaPassword;
 	}
 
-	// ### 🧩 Cloud Config Wrapper: auto-refreshes access token
+	// Cloud Config Wrapper: auto-refreshes access token
 	private async getCloudConfigWithRefresh(): Promise<CyncCloudConfig> {
 		try {
 			return await this.configClient.getCloudConfig();
@@ -530,18 +563,33 @@ export class CyncClient {
 		}
 	}
 
-	// ### 🧩 Device Properties Wrapper: auto-refresh on Access-Token Expired for mesh calls
+	// Device Properties Wrapper: auto-refresh on Access-Token Expired for mesh calls
 	private async getDevicePropertiesWithRefresh(
 		productId: string | number,
 		meshId: string | number,
 	): Promise<Record<string, unknown>> {
-		// Normalise to strings for ConfigClient
 		const productIdStr = String(productId);
 		const meshIdStr = String(meshId);
+
+		// If we've already learned this product_id never supports the endpoint, skip.
+		if (this.unsupportedPropertiesProductIds.has(productIdStr)) {
+			return {};
+		}
 
 		try {
 			return await this.configClient.getDeviceProperties(productIdStr, meshIdStr);
 		} catch (err) {
+			// Expected case for some product lines: endpoint not implemented.
+			if (this.isDevicePropertyNotExistsError(err)) {
+				this.unsupportedPropertiesProductIds.add(productIdStr);
+				this.log.debug(
+					'CyncClient: properties unsupported for product_id=%s (mesh id=%s); caching and skipping.',
+					productIdStr,
+					meshIdStr,
+				);
+				return {};
+			}
+
 			if (this.isAccessTokenExpiredError(err) && this.tokenData) {
 				this.log.warn(
 					'CyncClient: access token expired when calling getDeviceProperties(); refreshing and retrying once.',
@@ -626,7 +674,7 @@ export class CyncClient {
 
 		// Debug: inspect per-mesh properties so we can find the real devices.
 		for (const mesh of cfg.meshes) {
-			const meshName = mesh.name ?? mesh.id;
+			const meshName = this.formatMeshLabel({ name: mesh.name, id: mesh.id });
 			const homeId = String(mesh.id);
 
 			this.log.debug(
@@ -639,7 +687,15 @@ export class CyncClient {
 			// Per-home maps, mirroring HA's CyncUserData.get_cync_config()
 			const homeDevices: string[] = [];
 			const homeControllers: number[] = [];
-
+			const productIdStr = String(mesh.product_id);
+			if (this.unsupportedPropertiesProductIds.has(productIdStr)) {
+				this.log.debug(
+					'CyncClient: skipping properties probe for mesh %s (product_id=%s) — previously marked unsupported.',
+					meshName,
+					productIdStr,
+				);
+				continue;
+			}
 			try {
 				const props = await this.getDevicePropertiesWithRefresh(
 					mesh.product_id,
@@ -663,7 +719,7 @@ export class CyncClient {
 						bulbsArray[0] ? Object.keys(bulbsArray[0] as Record<string, unknown>) : [],
 					);
 
-					// ### 🧩 Bulb Capability Debug: log each bulb so we can classify plugs vs lights
+					// Bulb Capability Debug: log each bulb so we can classify plugs vs lights
 					bulbsArray.forEach((bulb, index) => {
 						const record = bulb as Record<string, unknown>;
 
@@ -791,6 +847,15 @@ export class CyncClient {
 					);
 				}
 			} catch (err) {
+				if (this.isDevicePropertyNotExistsError(err)) {
+					this.log.debug(
+						'CyncClient: getDeviceProperties not supported for mesh %s (%s).',
+						meshName,
+						String(mesh.id),
+					);
+					continue;
+				}
+
 				this.log.warn(
 					'CyncClient: getDeviceProperties failed for mesh %s (%s): %s',
 					meshName,

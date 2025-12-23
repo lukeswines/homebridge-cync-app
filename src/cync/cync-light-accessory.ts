@@ -55,19 +55,25 @@ export function configureCyncLightAccessory(
 	service
 		.getCharacteristic(Characteristic.On)
 		.onGet(() => {
+			const currentOn = !!ctx.cync?.on;
+
 			if (env.isDeviceProbablyOffline(deviceId)) {
-				throw new env.api.hap.HapStatusError(
-					env.api.hap.HAPStatus.SERVICE_COMMUNICATION_FAILURE,
+				env.log.debug(
+					'Cync: Light On.get offline-heuristic hit; returning cached=%s for %s (deviceId=%s)',
+					String(currentOn),
+					deviceName,
+					deviceId,
 				);
+				return currentOn;
 			}
 
-			const currentOn = !!ctx.cync?.on;
 			env.log.info(
 				'Cync: Light On.get -> %s for %s (deviceId=%s)',
 				String(currentOn),
 				deviceName,
 				deviceId,
 			);
+
 			return currentOn;
 		})
 		.onSet(async (value) => {
@@ -114,21 +120,24 @@ export function configureCyncLightAccessory(
 	service
 		.getCharacteristic(Characteristic.Brightness)
 		.onGet(() => {
-			if (env.isDeviceProbablyOffline(deviceId)) {
-				throw new env.api.hap.HapStatusError(
-					env.api.hap.HAPStatus.SERVICE_COMMUNICATION_FAILURE,
-				);
-			}
-
 			const current = ctx.cync?.brightness;
 
-			// If we have a cached LAN level, use it; otherwise infer from On.
-			if (typeof current === 'number') {
-				return current;
+			const cachedBrightness =
+				typeof current === 'number'
+					? current
+					: (ctx.cync?.on ?? false) ? 100 : 0;
+
+			if (env.isDeviceProbablyOffline(deviceId)) {
+				env.log.debug(
+					'Cync: Light Brightness.get offline-heuristic hit; returning cached=%d for %s (deviceId=%s)',
+					cachedBrightness,
+					deviceName,
+					deviceId,
+				);
+				return cachedBrightness;
 			}
 
-			const on = ctx.cync?.on ?? false;
-			return on ? 100 : 0;
+			return cachedBrightness;
 		})
 		.onSet(async (value) => {
 			const cyncMeta = ctx.cync;
@@ -196,18 +205,18 @@ export function configureCyncLightAccessory(
 	service
 		.getCharacteristic(Characteristic.Hue)
 		.onGet(() => {
+			const hue = typeof ctx.cync?.hue === 'number' ? ctx.cync.hue : 0;
+
 			if (env.isDeviceProbablyOffline(deviceId)) {
-				throw new env.api.hap.HapStatusError(
-					env.api.hap.HAPStatus.SERVICE_COMMUNICATION_FAILURE,
+				env.log.debug(
+					'Cync: Light Hue.get offline-heuristic hit; returning cached=%d for %s (deviceId=%s)',
+					hue,
+					deviceName,
+					deviceId,
 				);
 			}
 
-			const hue = ctx.cync?.hue;
-			if (typeof hue === 'number') {
-				return hue;
-			}
-			// Default to 0° (red) if we have no color history
-			return 0;
+			return hue;
 		})
 		.onSet(async (value) => {
 			const cyncMeta = ctx.cync;
@@ -280,17 +289,18 @@ export function configureCyncLightAccessory(
 	service
 		.getCharacteristic(Characteristic.Saturation)
 		.onGet(() => {
+			const sat = typeof ctx.cync?.saturation === 'number' ? ctx.cync.saturation : 100;
+
 			if (env.isDeviceProbablyOffline(deviceId)) {
-				throw new env.api.hap.HapStatusError(
-					env.api.hap.HAPStatus.SERVICE_COMMUNICATION_FAILURE,
+				env.log.debug(
+					'Cync: Light Saturation.get offline-heuristic hit; returning cached=%d for %s (deviceId=%s)',
+					sat,
+					deviceName,
+					deviceId,
 				);
 			}
 
-			const sat = ctx.cync?.saturation;
-			if (typeof sat === 'number') {
-				return sat;
-			}
-			return 100;
+			return sat;
 		})
 		.onSet(async (value) => {
 			const cyncMeta = ctx.cync;

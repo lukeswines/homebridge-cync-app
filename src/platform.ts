@@ -46,7 +46,7 @@ export class CyncAppPlatform implements DynamicPlatformPlugin {
 	private readonly deviceLastSeen = new Map<string, number>();
 	private readonly devicePollTimers = new Map<string, NodeJS.Timeout>();
 
-	private readonly offlineTimeoutMs = 5 * 60 * 1000; // 5 minutes
+	private readonly offlineTimeoutMs = 30 * 60 * 1000;
 	private readonly pollIntervalMs = 60_000; // 60 seconds
 
 	private markDeviceSeen(deviceId: string): void {
