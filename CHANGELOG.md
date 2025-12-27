@@ -1,5 +1,25 @@
 # Changelog
 
+## v0.1.9
+
+**Release Date:** 2025-12-22
+
+### Improvements
+- Added a device catalog to map Cync `deviceType` values to accurate model names in Home.app
+- Improved accessory identification and metadata population (model, firmware, identifiers)
+- Refactored accessory configuration logic for clearer separation by accessory type
+- Hardened accessory reconfiguration to safely remove stale HomeKit services when device roles change
+
+### Reliability
+- Improved polling behavior to better detect and mark unreachable devices
+- Reduced false-positive “responsive” states when devices stop reporting
+- More consistent recovery when devices come back online
+
+### Internal
+- Code cleanup and lint fixes following accessory refactors
+- Reduced unused imports and improved definition ordering
+- No breaking changes; no config updates required
+
 ## v0.1.8
 
 **Release Date:** 2025-12-11
