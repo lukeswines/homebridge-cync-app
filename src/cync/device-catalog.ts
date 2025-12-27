@@ -46,6 +46,18 @@ export const DEVICE_CATALOG: Record<number, CyncDeviceModel> = {
 		notes: 'Legacy C by GE plug. FCC ID PUU-CPLGSTDBLW1T / HVIN CPLGSTDBLW1T. Revised hardware. Final firmware 2.x.',
 		// defaultCategory: Categories.OUTLET,
 	},
+	137: {
+		deviceType: 137,
+		modelName: 'A19 Full Color Direct Connect Smart Bulb (3-in-1)',
+		marketingName: 'GE Cync A19 Smart LED Light Bulb, Color Changing Smart WiFi Light',
+		notes: 'Reported by users as full color + dimming bulbs; must be Lightbulb, not Switch.',
+	},
+	171: {
+		deviceType: 171,
+		modelName: 'A19 Full Color Direct Connect Smart Bulb (3-in-1)',
+		marketingName: 'GE Cync A19 Smart LED Light Bulb, Color Changing Smart WiFi Light',
+		notes: 'Reported alongside deviceType=137 in the same home; appears to be same class of bulb.',
+	},
 	172: {
 		deviceType: 172,
 		modelName: 'Indoor Smart Plug (3in1)',

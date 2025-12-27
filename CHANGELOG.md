@@ -1,5 +1,26 @@
 # Changelog
 
+## v0.1.10
+
+**Release Date:** 2025-12-26
+
+### Fixes
+- Fixed GE Cync A19 full-color smart bulbs (deviceType 137 / 171) incorrectly appearing as Switch accessories in Home.app
+- Full-color A19 bulbs are now correctly exposed as Lightbulb accessories with on/off, brightness, and color controls
+
+### Improvements
+- Expanded light accessory detection logic to support additional Cync bulb device types
+- Added device catalog entries for A19 Full Color Direct Connect Smart Bulbs (3-in-1)
+- Improved logging consistency when classifying devices by `deviceType`
+
+### Migration Notes
+- Existing accessories will automatically migrate from Switch → Lightbulb
+- In rare cases, a Homebridge restart or Home.app refresh may be required for the new service type to appear correctly
+
+### Internal
+- Centralized light device-type classification for easier future expansion
+- No breaking changes; no config updates required
+
 ## v0.1.9
 
 **Release Date:** 2025-12-22

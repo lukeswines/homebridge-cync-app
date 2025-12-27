@@ -28,6 +28,10 @@ const toCyncLogger = (log: Logger): CyncLogger => ({
 	error: log.error.bind(log),
 });
 
+function isCyncLightDeviceType(deviceType: number | undefined): boolean {
+	return deviceType === 46 || deviceType === 137 || deviceType === 171;
+}
+
 export class CyncAppPlatform implements DynamicPlatformPlugin {
 	public readonly accessories: PlatformAccessory[] = [];
 	public configureAccessory(accessory: PlatformAccessory): void {
@@ -356,38 +360,39 @@ export class CyncAppPlatform implements DynamicPlatformPlugin {
 				}
 
 				const deviceType = resolveDeviceType(device);
-				const isDownlight = deviceType === 46;
+				const deviceTypeStr =
+					typeof deviceType === 'number' ? String(deviceType) : 'unknown';
 
-				if (isDownlight) {
-				  this.log.info(
-				    'Cync: configuring %s as Lightbulb (deviceType=%s, deviceId=%s)',
-				    deviceName,
-				    String(deviceType),
-				    deviceId,
-				  );
-				  configureCyncLightAccessory(
-				    this.accessoryEnv,
-				    mesh,
-				    device,
-				    accessory,
-				    deviceName,
-				    deviceId,
-				  );
+				if (isCyncLightDeviceType(deviceType)) {
+					this.log.info(
+						'Cync: configuring %s as Lightbulb (deviceType=%s, deviceId=%s)',
+						deviceName,
+						deviceTypeStr,
+						deviceId,
+					);
+					configureCyncLightAccessory(
+						this.accessoryEnv,
+						mesh,
+						device,
+						accessory,
+						deviceName,
+						deviceId,
+					);
 				} else {
-				  this.log.info(
-				    'Cync: configuring %s as Switch (deviceType=%s, deviceId=%s)',
-				    deviceName,
-				    deviceType ?? 'unknown',
-				    deviceId,
-				  );
-				  configureCyncSwitchAccessory(
-				    this.accessoryEnv,
-				    mesh,
-				    device,
-				    accessory,
-				    deviceName,
-				    deviceId,
-				  );
+					this.log.info(
+						'Cync: configuring %s as Switch (deviceType=%s, deviceId=%s)',
+						deviceName,
+						deviceTypeStr,
+						deviceId,
+					);
+					configureCyncSwitchAccessory(
+						this.accessoryEnv,
+						mesh,
+						device,
+						accessory,
+						deviceName,
+						deviceId,
+					);
 				}
 			}
 		}
