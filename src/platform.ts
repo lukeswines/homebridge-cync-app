@@ -85,12 +85,12 @@ export class CyncAppPlatform implements DynamicPlatformPlugin {
 	}
 
 	private handleLanUpdate(update: unknown): void {
-		// Parsed 0x83 frames from TcpClient.parseLanSwitchUpdate look like:
-		// { controllerId: number, deviceId?: string, on: boolean, level: number }
+		// Parsed LAN frames may look like:
+		// { controllerId: number, deviceId?: string, on: boolean, level: number, brightnessPct?: number }
 		const payload = update as {
 			deviceId?: string;
 			on?: boolean;
-			level?: number;
+			brightnessPct?: number; // 0–100
 		};
 
 		if (!payload || typeof payload.deviceId !== 'string') {
@@ -99,6 +99,7 @@ export class CyncAppPlatform implements DynamicPlatformPlugin {
 
 		const accessory = this.deviceIdToAccessory.get(payload.deviceId);
 		this.markDeviceSeen(payload.deviceId);
+
 		if (!accessory) {
 			this.log.debug(
 				'Cync: LAN update for unknown deviceId=%s; no accessory mapping',
@@ -144,30 +145,34 @@ export class CyncAppPlatform implements DynamicPlatformPlugin {
 			primaryService.updateCharacteristic(Characteristic.On, payload.on);
 		}
 
-		// ----- Brightness (LAN "level" 0–100) -----
-		if (typeof payload.level === 'number' && lightService) {
-			const brightness = Math.max(
-				0,
-				Math.min(100, Math.round(payload.level)),
-			);
+		// ----- Brightness -----
+		if (lightService) {
+			let brightnessPct: number | undefined;
 
-			ctx.cync.brightness = brightness;
+			if (typeof payload.brightnessPct === 'number' && Number.isFinite(payload.brightnessPct)) {
+				brightnessPct = Math.max(0, Math.min(100, Math.round(payload.brightnessPct)));
+			}
 
-			this.log.debug(
-				'Cync: LAN update -> %s brightness=%d (deviceId=%s)',
-				accessory.displayName,
-				brightness,
-				payload.deviceId,
-			);
+			if (brightnessPct !== undefined) {
+				ctx.cync.brightness = brightnessPct;
 
-			if (lightService.testCharacteristic(Characteristic.Brightness)) {
-				lightService.updateCharacteristic(
-					Characteristic.Brightness,
-					brightness,
+				this.log.debug(
+					'Cync: LAN update -> %s brightness=%d (deviceId=%s)',
+					accessory.displayName,
+					brightnessPct,
+					payload.deviceId,
 				);
+
+				if (lightService.testCharacteristic(Characteristic.Brightness)) {
+					lightService.updateCharacteristic(
+						Characteristic.Brightness,
+						brightnessPct,
+					);
+				}
 			}
 		}
 	}
+
 
 	constructor(log: Logger, config: PlatformConfig, api: API) {
 		this.log = log;

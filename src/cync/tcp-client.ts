@@ -16,6 +16,21 @@ export type RawFrameListener = (frame: Buffer) => void;
 
 type TransportMode = 'tls_strict' | 'tls_relaxed' | 'tcp';
 
+function clampNumber(n: number, min: number, max: number): number {
+	return Math.min(max, Math.max(min, n));
+}
+
+function hkBrightnessToPct100Byte(hkBrightness: number): number {
+	const hk = clampNumber(Math.round(hkBrightness), 0, 100);
+
+	if (hk <= 0) {
+		return 0;
+	}
+
+	// enforce 1–100 for ON state
+	return clampNumber(hk, 1, 100);
+}
+
 export class TcpClient {
 	private transportMode: TransportMode | null = null;
 
@@ -46,6 +61,7 @@ export class TcpClient {
 	private reconnectAttempt = 0;
 	private connectInFlight: Promise<void> | null = null;
 	private shuttingDown = false;
+	private deviceBrightnessEncoding = new Map<string, 'pct100' | 'lvl254'>();
 
 	private enqueueCommand<T>(fn: () => Promise<T>): Promise<T> {
 		let resolveWrapper: (value: T | PromiseLike<T>) => void;
@@ -73,15 +89,18 @@ export class TcpClient {
 
 		return p;
 	}
-	private parseSwitchStateFrame(frame: Buffer): { controllerId: number; on: boolean; level: number } | null {
+
+	private parseSwitchStateFrame(frame: Buffer): {
+		controllerId: number;
+		on: boolean;
+		brightnessPct: number;
+	} | null {
 		if (frame.length < 16) {
 			return null;
 		}
 
-		// First 4 bytes are the controller ID (big-endian)
 		const controllerId = frame.readUInt32BE(0);
 
-		// Look for the marker sequence db 11 02 01
 		const marker = Buffer.from('db110201', 'hex');
 		const idx = frame.indexOf(marker);
 
@@ -89,7 +108,6 @@ export class TcpClient {
 			return null;
 		}
 
-		// We need at least two bytes following the marker: onFlag + level
 		const onIndex = idx + marker.length;
 		const levelIndex = onIndex + 1;
 
@@ -98,21 +116,37 @@ export class TcpClient {
 		}
 
 		const onFlag = frame[onIndex];
-		const level = frame[levelIndex];
+		const levelByte = frame[levelIndex]; // device sends a byte; treat as pct
+		const on = onFlag === 0x01 && levelByte > 0;
+		if (on && levelByte > 100) {
+			this.log.debug(
+				'[Cync TCP] Legacy parse: brightness byte >100 (%d); clamping to 100',
+				levelByte,
+			);
+		}
 
-		const on = onFlag === 0x01 && level > 0;
+		// Treat the byte as 0–100 percent; clamp hard.
+		const brightnessPct = on ? clampNumber(levelByte, 1, 100) : 0;
 
-		return { controllerId, on, level };
+		this.log.debug(
+			'[Cync TCP] Legacy parse: controllerId=%d onFlag=%d levelByte=%d -> hkPct=%d',
+			controllerId,
+			onFlag,
+			levelByte,
+			brightnessPct,
+		);
+
+		return { controllerId, on, brightnessPct };
 	}
 
-	private parseLanSwitchUpdate(frame: Buffer): {
+	private parseLanSwitchUpdate(
+		frame: Buffer,
+	): {
 		controllerId: number;
 		deviceId?: string;
 		on: boolean;
-		level: number;
+		brightnessPct: number;
 	} | null {
-		// Need at least enough bytes for the HA layout:
-		// switch_id(4) ... type(1) ... deviceIndex(1) ... state(1) ... brightness(1)
 		if (frame.length < 29) {
 			return null;
 		}
@@ -129,7 +163,6 @@ export class TcpClient {
 			return null;
 		}
 
-		// HA checks: packet_length >= 33 and packet[13] == 219 (0xdb)
 		const typeByte = frame[13];
 		if (typeByte !== 0xdb) {
 			return null;
@@ -139,30 +172,36 @@ export class TcpClient {
 		const stateByte = frame[27];
 		const levelByte = frame[28];
 
-		const on = stateByte > 0;
-		const level = on ? levelByte : 0;
-
 		const deviceId = deviceIndex < devices.length ? devices[deviceIndex] : undefined;
 
-		return {
-			controllerId,
-			deviceId,
-			on,
-			level,
-		};
+		const on = stateByte > 0;
+		if (on && levelByte > 100) {
+			this.log.debug(
+				'[Cync TCP] LAN parse: brightness byte >100 (%d); clamping to 100',
+				levelByte,
+			);
+		}
+
+		// Treat the byte as 0–100 percent; clamp hard.
+		const brightnessPct = on ? clampNumber(levelByte, 1, 100) : 0;
+
+		this.log.debug(
+			'[Cync TCP] LAN parse bytes: typeByte=0x%s stateByte=%d levelByte=%d -> hkPct=%d',
+			typeByte.toString(16).padStart(2, '0'),
+			stateByte,
+			levelByte,
+			brightnessPct,
+		);
+
+		return { controllerId, deviceId, on, brightnessPct };
 	}
+
 
 	constructor(logger?: CyncLogger) {
 		this.log = logger ?? defaultLogger;
 	}
 
-	/**
-	 * Establish a TCP session to one or more Cync devices.
-	 *
-	 * For Homebridge:
-	 * - We cache loginCode + config here.
-	 * - Actual socket creation happens in ensureConnected()/establishSocket().
-	 */
+
 	public async connect(
 		loginCode: Uint8Array,
 		config: CyncCloudConfig,
@@ -430,7 +469,7 @@ export class TcpClient {
 		controllerId: number,
 		meshId: number,
 		on: boolean,
-		brightnessPct: number,
+		brightnessLevel: number,
 		colorTone: number,
 		rgb: { r: number; g: number; b: number },
 		seq: number,
@@ -451,7 +490,7 @@ export class TcpClient {
 		const tailPrefix = Buffer.from('f00000', 'hex');
 
 		const onByte = on ? 1 : 0;
-		const brightnessByte = Math.max(0, Math.min(100, Math.round(brightnessPct)));
+		const brightnessByte = Math.max(0, Math.min(255, Math.round(brightnessLevel)));
 		const colorToneByte = Math.max(0, Math.min(255, Math.round(colorTone)));
 
 		const r = Math.max(0, Math.min(255, Math.round(rgb.r)));
@@ -592,7 +631,11 @@ export class TcpClient {
 		});
 	}
 
-	public async setBrightness(deviceId: string, brightnessPct: number): Promise<void> {
+	public async setBrightness(
+		deviceId: string,
+		brightnessPct: number,
+		deviceType?: number,
+	): Promise<void> {
 		return this.enqueueCommand(async () => {
 			if (!this.config) {
 				this.log.warn('[Cync TCP] setBrightness: no config available.');
@@ -614,6 +657,7 @@ export class TcpClient {
 			}
 
 			const record = device as Record<string, unknown>;
+			this.log.debug('[Cync TCP] setBrightness: using deviceType=%s', String(deviceType));
 			const controllerId = Number(record.switch_controller);
 			const meshIndex = Number(record.mesh_id);
 
@@ -628,27 +672,32 @@ export class TcpClient {
 			}
 
 			const clamped = Math.max(0, Math.min(100, Number(brightnessPct)));
+			if (!Number.isFinite(clamped)) {
+				this.log.warn('[Cync TCP] setBrightness: invalid brightnessPct=%o', brightnessPct);
+				return;
+			}
+
 			const on = clamped > 0;
-
+			const level = hkBrightnessToPct100Byte(clamped);
 			const seq = this.nextSeq();
-
-			// White-only combo control for now; color support can layer on this later.
 			const packet = this.buildComboPacket(
 				controllerId,
 				meshIndex,
 				on,
-				clamped,
-				255, // color_tone=255 ("white" in HA integration)
+				level,
+				254,
 				{ r: 255, g: 255, b: 255 },
 				seq,
 			);
 
 			this.socket.write(packet);
 			this.log.info(
-				'[Cync TCP] Sent combo (brightness) packet: device=%s on=%s brightness=%d seq=%d',
+				'[Cync TCP] Sent combo (brightness) packet: device=%s type=%s on=%s hkBrightness=%d pctByte=%d level=%d seq=%d',
 				deviceId,
+				String(deviceType),
 				String(on),
 				clamped,
+				level,
 				seq,
 			);
 		});
@@ -658,6 +707,7 @@ export class TcpClient {
 		deviceId: string,
 		rgb: { r: number; g: number; b: number },
 		brightnessPct?: number,
+		deviceType?: number,
 	): Promise<void> {
 		return this.enqueueCommand(async () => {
 			if (!this.config) {
@@ -680,6 +730,13 @@ export class TcpClient {
 			}
 
 			const record = device as Record<string, unknown>;
+			this.log.debug(
+				'[Cync TCP] device type candidates: device_type=%o deviceType=%o device_type_id=%o deviceTypeId=%o',
+				record.device_type,
+				record.deviceType,
+				record.device_type_id,
+				record.deviceTypeId,
+			);
 			const controllerId = Number(record.switch_controller);
 			const meshIndex = Number(record.mesh_id);
 
@@ -693,11 +750,10 @@ export class TcpClient {
 				return;
 			}
 
-			const clampedBrightness = Math.max(
-				0,
-				Math.min(100, Math.round(brightnessPct ?? 100)),
-			);
-			const on = clampedBrightness > 0;
+			const hkBrightness = Math.max(0, Math.min(100, Math.round(brightnessPct ?? 100)));
+			const on = hkBrightness > 0;
+
+			const level = hkBrightnessToPct100Byte(hkBrightness);
 
 			const r = Math.max(0, Math.min(255, Math.round(rgb.r)));
 			const g = Math.max(0, Math.min(255, Math.round(rgb.g)));
@@ -705,12 +761,11 @@ export class TcpClient {
 
 			const seq = this.nextSeq();
 
-			// colorTone=254 => "color" mode, per HA's combo_control for RGB
 			const packet = this.buildComboPacket(
 				controllerId,
 				meshIndex,
 				on,
-				clampedBrightness,
+				level,
 				254,
 				{ r, g, b },
 				seq,
@@ -718,10 +773,12 @@ export class TcpClient {
 
 			this.socket.write(packet);
 			this.log.info(
-				'[Cync TCP] Sent color combo packet: device=%s on=%s brightness=%d rgb=(%d,%d,%d) seq=%d',
+				'[Cync TCP] Sent color combo packet: device=%s type=%s on=%s hkBrightness=%d level=%d rgb=(%d,%d,%d) seq=%d',
 				deviceId,
+				String(deviceType),
 				String(on),
-				clampedBrightness,
+				hkBrightness,
+				level,
 				r,
 				g,
 				b,
@@ -729,6 +786,7 @@ export class TcpClient {
 			);
 		});
 	}
+
 	private findDevice(deviceId: string) {
 		for (const mesh of this.config?.meshes ?? []) {
 			for (const dev of mesh.devices ?? []) {

@@ -43,6 +43,14 @@ export function configureCyncLightAccessory(
 		productId: device.product_id,
 		on: false,
 	};
+	// Persist deviceType in context so TcpClient can encode brightness correctly for LAN packets.
+	const deviceType =
+		(device as unknown as { deviceType?: number; device_type?: number }).deviceType ??
+		(device as unknown as { deviceType?: number; device_type?: number }).device_type;
+
+	if (typeof deviceType === 'number' && Number.isFinite(deviceType)) {
+		ctx.cync.deviceType = deviceType;
+	}
 
 	// Remember mapping for LAN updates
 	env.registerAccessoryForDevice(deviceId, accessory);
@@ -173,18 +181,16 @@ export function configureCyncLightAccessory(
 				cyncMeta.deviceId,
 			);
 
+			env.log.debug(
+				'Cync: Brightness.set sending brightness-only (colorActive=%s rgb=%o)',
+				String(!!cyncMeta.colorActive),
+				cyncMeta.rgb,
+			);
+
 			try {
-				// If we're in "color mode", keep the existing RGB and scale brightness via setColor();
-				// otherwise treat this as a white-brightness change.
-				if (cyncMeta.colorActive && cyncMeta.rgb) {
-					await env.tcpClient.setColor(
-						cyncMeta.deviceId,
-						cyncMeta.rgb,
-						brightness,
-					);
-				} else {
-					await env.tcpClient.setBrightness(cyncMeta.deviceId, brightness);
-				}
+				// Always treat Brightness as a brightness-only operation.
+				// Color should only be sent when Hue/Saturation changes.
+				await env.tcpClient.setBrightness(cyncMeta.deviceId, brightness, cyncMeta.deviceType);
 
 				env.markDeviceSeen(cyncMeta.deviceId);
 			} catch (err) {
@@ -269,7 +275,12 @@ export function configureCyncLightAccessory(
 			);
 
 			try {
-				await env.tcpClient.setColor(cyncMeta.deviceId, rgb, brightness);
+				await env.tcpClient.setColor(
+					cyncMeta.deviceId,
+					cyncMeta.rgb,
+					brightness,
+					cyncMeta.deviceType,
+				);
 				env.markDeviceSeen(cyncMeta.deviceId);
 			} catch (err) {
 				env.log.warn(
@@ -351,7 +362,12 @@ export function configureCyncLightAccessory(
 			);
 
 			try {
-				await env.tcpClient.setColor(cyncMeta.deviceId, rgb, brightness);
+				await env.tcpClient.setColor(
+					cyncMeta.deviceId,
+					rgb,
+					brightness,
+					cyncMeta.deviceType,
+				);
 				env.markDeviceSeen(cyncMeta.deviceId);
 			} catch (err) {
 				env.log.warn(

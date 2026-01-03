@@ -30,16 +30,8 @@ export class CyncTokenStore {
 		try {
 			const raw = await fs.readFile(this.filePath, 'utf8');
 			const data = JSON.parse(raw) as CyncTokenData;
-
-			const now = Date.now();
-
-			if (typeof data.expiresAt === 'number' && data.expiresAt <= now) {
-				return null;
-			}
-
 			return data;
 		} catch {
-			// file missing or unreadable → treat as no token
 			return null;
 		}
 	}

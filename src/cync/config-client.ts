@@ -64,6 +64,11 @@ export interface CyncLoginSession {
 	accessToken: string;
 	userId: string;
 	authorize?: string;
+
+	// Token refresh support
+	refreshToken?: string;
+	expiresAt?: number;
+
 	raw: unknown;
 }
 
@@ -222,6 +227,16 @@ export class ConfigClient {
 		const userIdRaw = obj.user_id ?? obj.userId;
 		const authorizeRaw = obj.authorize;
 
+		// Token refresh fields (observed from /user_auth/two_factor):
+		// - refresh_token
+		// - expire_in (seconds)
+		const refreshTokenRaw = obj.refresh_token ?? obj.refreshToken;
+		const expireInRaw =
+			obj.expire_in ??
+			obj.expires_in ??
+			obj.expireIn ??
+			obj.expiresIn;
+
 		const accessToken =
 			typeof accessTokenRaw === 'string' && accessTokenRaw.length > 0
 				? accessTokenRaw
@@ -242,6 +257,21 @@ export class ConfigClient {
 			throw new Error('Cync login response missing access_token or user_id');
 		}
 
+		let refreshToken: string | undefined;
+		if (typeof refreshTokenRaw === 'string' && refreshTokenRaw.length > 0) {
+			refreshToken = refreshTokenRaw;
+		}
+
+		let expiresAt: number | undefined;
+		if (typeof expireInRaw === 'number' && expireInRaw > 0) {
+			expiresAt = Date.now() + expireInRaw * 1000;
+		} else if (typeof expireInRaw === 'string') {
+			const n = Number(expireInRaw);
+			if (Number.isFinite(n) && n > 0) {
+				expiresAt = Date.now() + n * 1000;
+			}
+		}
+
 		this.accessToken = accessToken;
 		this.userId = userId;
 		this.authorize = authorize ?? null;
@@ -252,6 +282,8 @@ export class ConfigClient {
 			accessToken,
 			userId,
 			authorize,
+			refreshToken,
+			expiresAt,
 			raw: json,
 		};
 	}
@@ -311,7 +343,13 @@ export class ConfigClient {
 		const userIdRaw = obj.user_id ?? obj.userId;
 		const authorizeRaw = obj.authorize;
 		const refreshTokenRaw = obj.refresh_token ?? obj.refreshToken;
+
 		const expiresAtRaw = obj.expires_at ?? obj.expiresAt;
+		const expireInRaw =
+			obj.expire_in ??
+			obj.expires_in ??
+			obj.expireIn ??
+			obj.expiresIn;
 
 		const accessToken =
 			typeof accessTokenRaw === 'string' && accessTokenRaw.length > 0
@@ -344,8 +382,22 @@ export class ConfigClient {
 		}
 
 		let expiresAt: number | undefined;
+
+		// Prefer absolute expiresAt if present, otherwise derive from expire_in
 		if (typeof expiresAtRaw === 'number') {
-			expiresAt = expiresAtRaw;
+			expiresAt = expiresAtRaw < 2_000_000_000 ? expiresAtRaw * 1000 : expiresAtRaw;
+		} else if (typeof expiresAtRaw === 'string') {
+			const n = Number(expiresAtRaw);
+			if (Number.isFinite(n)) {
+				expiresAt = n < 2_000_000_000 ? n * 1000 : n;
+			}
+		} else if (typeof expireInRaw === 'number' && expireInRaw > 0) {
+			expiresAt = Date.now() + expireInRaw * 1000;
+		} else if (typeof expireInRaw === 'string') {
+			const n = Number(expireInRaw);
+			if (Number.isFinite(n) && n > 0) {
+				expiresAt = Date.now() + n * 1000;
+			}
 		}
 
 		this.accessToken = accessToken;
@@ -416,7 +468,13 @@ export class ConfigClient {
 
 		const accessTokenRaw = obj.access_token ?? obj.accessToken;
 		const refreshTokenRaw = obj.refresh_token ?? obj.refreshToken;
+
 		const expiresAtRaw = obj.expires_at ?? obj.expiresAt;
+		const expireInRaw =
+			obj.expire_in ??
+			obj.expires_in ??
+			obj.expireIn ??
+			obj.expiresIn;
 
 		const accessToken =
 			typeof accessTokenRaw === 'string' && accessTokenRaw.length > 0
@@ -436,8 +494,27 @@ export class ConfigClient {
 			next.refreshToken = refreshTokenRaw;
 		}
 
+		// Prefer absolute expiresAt if present; otherwise derive from expire_in
+		let expiresAt: number | undefined;
+
 		if (typeof expiresAtRaw === 'number') {
-			next.expiresAt = expiresAtRaw;
+			expiresAt = expiresAtRaw < 2_000_000_000 ? expiresAtRaw * 1000 : expiresAtRaw;
+		} else if (typeof expiresAtRaw === 'string') {
+			const n = Number(expiresAtRaw);
+			if (Number.isFinite(n)) {
+				expiresAt = n < 2_000_000_000 ? n * 1000 : n;
+			}
+		} else if (typeof expireInRaw === 'number' && expireInRaw > 0) {
+			expiresAt = Date.now() + expireInRaw * 1000;
+		} else if (typeof expireInRaw === 'string') {
+			const n = Number(expireInRaw);
+			if (Number.isFinite(n) && n > 0) {
+				expiresAt = Date.now() + n * 1000;
+			}
+		}
+
+		if (expiresAt !== undefined) {
+			next.expiresAt = expiresAt;
 		}
 
 		return next;
@@ -494,10 +571,7 @@ export class ConfigClient {
 				Object.keys(json as Record<string, unknown>),
 			);
 		} else {
-			this.log.debug(
-				'Cync devices payload: top-level type=%s',
-				typeof json,
-			);
+			this.log.debug('Cync devices payload: top-level type=%s', typeof json);
 		}
 
 		// Some Cync responses wrap arrays; others are raw arrays.
@@ -508,8 +582,6 @@ export class ConfigClient {
 		} else if (json && typeof json === 'object') {
 			const obj = json as Record<string, unknown>;
 
-			// Best guess: devices may be under a named property.
-			// We just log for now; once we see the payload, we can wire this properly.
 			this.log.debug(
 				'Cync devices payload (object) example values for known keys=%o',
 				{
@@ -519,7 +591,6 @@ export class ConfigClient {
 				},
 			);
 
-			// Temporary: if there's a "data" array, treat that as meshes.
 			if (Array.isArray(obj.data)) {
 				meshes = obj.data as CyncDeviceMesh[];
 			} else if (Array.isArray(obj.meshes)) {
@@ -528,7 +599,6 @@ export class ConfigClient {
 		}
 
 		return { meshes };
-
 	}
 
 	/**
@@ -606,7 +676,7 @@ export class ConfigClient {
 
 	private ensureSession(): void {
 		if (!this.accessToken || !this.userId) {
-			throw new Error('Cync session not initialised. Call loginWithTwoFactor() first.');
+			throw new Error('Cync session not initialised. Call loginWithTwoFactor() or loginWithPassword() first.');
 		}
 	}
 	// LAN Login Blob Builder: Generates the auth_code payload used by Cync LAN TCP

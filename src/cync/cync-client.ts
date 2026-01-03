@@ -101,51 +101,30 @@ export class CyncClient {
 				'CyncClient: performing background username/password login (no OTP) to obtain a fresh token…',
 			);
 
-			const session = await this.configClient.loginWithPassword(
-				username.trim(),
-				password,
-			);
-
-			const raw = session.raw as Record<string, unknown>;
-			const authorize =
-				typeof raw.authorize === 'string' ? raw.authorize : undefined;
+			const session = await this.configClient.loginWithPassword(username.trim(), password);
 
 			const s = session as unknown as SessionWithPossibleTokens;
 			const access = s.accessToken ?? s.jwt;
-
 			if (!access) {
-				this.log.error(
-					'CyncClient: password login session did not return an access token.',
-				);
+				this.log.error('CyncClient: password login session did not return an access token.');
 				return null;
 			}
 
-			const refresh = s.refreshToken ?? s.refreshJwt;
-			const expiresAt = s.expiresAt;
+			const authorize = session.authorize;
 
 			let lanLoginCode: string | undefined;
 			if (authorize) {
-				const userIdNum = Number.parseInt(session.userId, 10);
-				if (Number.isFinite(userIdNum) && userIdNum >= 0) {
-					const lanBlob = this.buildLanLoginCode(authorize, userIdNum);
-					lanLoginCode = Buffer.from(lanBlob).toString('base64');
-				} else {
-					this.log.warn(
-						'CyncClient: password login returned non-numeric userId=%s; LAN login code not generated.',
-						session.userId,
-					);
-				}
+				const lanBlob = ConfigClient.buildLanLoginCode(String(session.userId), authorize);
+				lanLoginCode = Buffer.from(lanBlob).toString('base64');
 			} else {
-				this.log.warn(
-					'CyncClient: password login response missing "authorize"; LAN login may be disabled.',
-				);
+				this.log.warn('CyncClient: login response missing "password login"; LAN login will be disabled.');
 			}
 
 			const next: CyncTokenData = {
 				userId: String(session.userId),
 				accessToken: access,
-				refreshToken: refresh,
-				expiresAt,
+				refreshToken: s.refreshToken ?? s.refreshJwt,
+				expiresAt: s.expiresAt,
 				authorize,
 				lanLoginCode,
 			};
@@ -157,17 +136,12 @@ export class CyncClient {
 			this.log.info(
 				'CyncClient: obtained new token via password login; userId=%s expiresAt=%s',
 				next.userId,
-				next.expiresAt
-					? new Date(next.expiresAt).toISOString()
-					: 'unknown',
+				next.expiresAt ? new Date(next.expiresAt).toISOString() : 'unknown',
 			);
 
 			return next;
 		} catch (err) {
-			this.log.error(
-				'CyncClient: password-based background login failed: %o',
-				err,
-			);
+			this.log.error('CyncClient: password-based background login failed: %o', err);
 			return null;
 		}
 	}
@@ -217,33 +191,12 @@ export class CyncClient {
 		);
 	}
 
-	// LAN Login Code Builder
-	private buildLanLoginCode(authorize: string, userId: number): Uint8Array {
-		const authorizeBytes = Buffer.from(authorize, 'ascii');
-
-		const head = Buffer.from('13000000', 'hex');
-		const lengthByte = Buffer.from([10 + authorizeBytes.length]);
-		const tag = Buffer.from('03', 'hex');
-
-		const userIdBytes = Buffer.alloc(4);
-		userIdBytes.writeUInt32BE(userId);
-
-		const authLenBytes = Buffer.alloc(2);
-		authLenBytes.writeUInt16BE(authorizeBytes.length);
-
-		const tail = Buffer.from('0000b4', 'hex');
-
-		return Buffer.concat([
-			head,
-			lengthByte,
-			tag,
-			userIdBytes,
-			authLenBytes,
-			authorizeBytes,
-			tail,
-		]);
+	private isTokenExpiredOrStale(expiresAt: number | undefined, skewMs = 60_000): boolean {
+		if (!expiresAt || !Number.isFinite(expiresAt)) {
+			return false;
+		}
+		return Date.now() >= (expiresAt - skewMs);
 	}
-
 	/**
 		 * Ensure we are logged in:
 		 * 1) Try stored token.
@@ -255,20 +208,35 @@ export class CyncClient {
 		const stored = await this.tokenStore.load();
 		if (stored) {
 			this.log.info(
-				'CyncClient: using stored token for userId=%s (expiresAt=%s)',
+				'CyncClient: loaded stored token for userId=%s (expiresAt=%s)',
 				stored.userId,
 				stored.expiresAt ? new Date(stored.expiresAt).toISOString() : 'unknown',
 			);
 
 			this.tokenData = stored;
 
-			// Hydrate ConfigClient + session snapshot.
-			this.applyAccessToken(stored);
+			// If the token is expired / near-expiry, refresh it now.
+			if (this.isTokenExpiredOrStale(stored.expiresAt)) {
+				this.log.warn(
+					'CyncClient: stored access token is expired or near expiry; refreshing before use.',
+				);
 
-			return true;
+				const refreshed = await this.refreshAccessToken(stored);
+				if (!refreshed) {
+					this.log.error(
+						'CyncClient: unable to refresh stored token; falling back to interactive login.',
+					);
+				} else {
+					return true; // refreshAccessToken() already saves + applies
+				}
+			} else {
+				// Token looks valid; apply it.
+				this.applyAccessToken(stored);
+				return true;
+			}
 		}
 
-		// 2) No stored token – run 2FA bootstrap
+		// 2) No stored token OR refresh failed – run 2FA bootstrap
 		const { username, password, twoFactor } = this.loginConfig;
 
 		if (!username || !password) {
@@ -277,10 +245,7 @@ export class CyncClient {
 		}
 
 		const trimmedCode = typeof twoFactor === 'string' ? twoFactor.trim() : '';
-		const hasTwoFactor = trimmedCode.length > 0;
-
-		if (!hasTwoFactor) {
-			// No 2FA code – request one
+		if (trimmedCode.length === 0) {
 			this.log.info('Cync: starting 2FA handshake for %s', username);
 			await this.requestTwoFactorCode(username);
 			this.log.info(
@@ -291,26 +256,18 @@ export class CyncClient {
 
 		// We have a 2FA code – complete login and persist token
 		this.log.info('Cync: completing 2FA login for %s', username);
-		const loginResult = await this.completeTwoFactorLogin(
-			username,
-			password,
-			trimmedCode,
-		);
+		const loginResult = await this.completeTwoFactorLogin(username, password, trimmedCode);
 
-		// Build LAN login code
-		let authorize: string | undefined;
+		const authorize = typeof (loginResult.raw as Record<string, unknown>)?.authorize === 'string'
+			? (loginResult.raw as Record<string, unknown>).authorize as string
+			: undefined;
+
 		let lanLoginCode: string | undefined;
-
-		const raw = loginResult.raw as Record<string, unknown>;
-		if (typeof raw.authorize === 'string') {
-			authorize = raw.authorize;
-
-			const lanBlob = this.buildLanLoginCode(authorize, Number(loginResult.userId));
+		if (authorize) {
+			const lanBlob = ConfigClient.buildLanLoginCode(String(loginResult.userId), authorize);
 			lanLoginCode = Buffer.from(lanBlob).toString('base64');
 		} else {
-			this.log.warn(
-				'CyncClient: login response missing "authorize"; LAN login will be disabled.',
-			);
+			this.log.warn('CyncClient: login response missing "authorize"; LAN login will be disabled.');
 		}
 
 		const tokenData: CyncTokenData = {
@@ -318,7 +275,6 @@ export class CyncClient {
 			accessToken: loginResult.accessToken,
 			refreshToken: loginResult.refreshToken,
 			expiresAt: loginResult.expiresAt ?? undefined,
-
 			authorize,
 			lanLoginCode,
 		};
@@ -326,13 +282,11 @@ export class CyncClient {
 		await this.tokenStore.save(tokenData);
 		this.tokenData = tokenData;
 
-		// Hydrate ConfigClient + session snapshot from the freshly obtained token.
 		this.applyAccessToken(tokenData);
 
 		this.log.info('Cync login successful; userId=%s (token stored)', tokenData.userId);
 		return true;
 	}
-
 
 	/**
 	 * Internal helper: request a 2FA email code using existing authenticate().
@@ -350,27 +304,13 @@ export class CyncClient {
 		email: string,
 		password: string,
 		code: string,
-	): Promise<
-		CyncLoginSession & {
-			accessToken: string;
-			refreshToken?: string;
-			expiresAt?: number;
-		}
-	> {
+	): Promise<CyncLoginSession & { accessToken: string; refreshToken?: string; expiresAt?: number; authorize?: string }> {
 		const session = await this.submitTwoFactor(email, password, code);
 
-		// Extract authorize field from session.raw (Cync returns it)
 		const raw = session.raw as Record<string, unknown>;
-		const authorize = typeof raw?.authorize === 'string' ? raw.authorize : undefined;
-
-		if (!authorize) {
-			throw new Error(
-				'CyncClient: missing "authorize" field from login response; LAN login cannot be generated.',
-			);
-		}
+		const authorize = typeof raw.authorize === 'string' ? raw.authorize : undefined;
 
 		const s = session as unknown as SessionWithPossibleTokens;
-
 		const access = s.accessToken ?? s.jwt;
 		if (!access) {
 			throw new Error('CyncClient: login session did not return an access token.');
@@ -384,6 +324,7 @@ export class CyncClient {
 			authorize,
 		};
 	}
+
 
 	/**
 	 * Apply an access token (and associated metadata) to the underlying ConfigClient,
@@ -415,9 +356,12 @@ export class CyncClient {
 			},
 		};
 		// Restore LAN auth blob into memory
-		if (tokenData.authorize && tokenData.lanLoginCode) {
-			this.log.debug('CyncClient: LAN login code restored from token store.');
-			// nothing else needed — getLanLoginCode() will use it
+		if (tokenData.authorize && !tokenData.lanLoginCode) {
+			const lanBlob = ConfigClient.buildLanLoginCode(tokenData.userId, tokenData.authorize);
+			tokenData.lanLoginCode = Buffer.from(lanBlob).toString('base64');
+			this.log.debug('CyncClient: LAN login code generated from stored authorize.');
+		} else if (tokenData.authorize && tokenData.lanLoginCode) {
+			this.log.debug('CyncClient: LAN login code present in token store.');
 		} else {
 			this.log.debug('CyncClient: token store missing LAN login fields.');
 		}
@@ -569,7 +513,6 @@ export class CyncClient {
 		meshId: string | number,
 	): Promise<Record<string, unknown>> {
 		const productIdStr = String(productId);
-		const meshIdStr = String(meshId);
 
 		// If we've already learned this product_id never supports the endpoint, skip.
 		if (this.unsupportedPropertiesProductIds.has(productIdStr)) {
@@ -577,7 +520,7 @@ export class CyncClient {
 		}
 
 		try {
-			return await this.configClient.getDeviceProperties(productIdStr, meshIdStr);
+			return await this.configClient.getDeviceProperties(productIdStr, String(meshId));
 		} catch (err) {
 			// Expected case for some product lines: endpoint not implemented.
 			if (this.isDevicePropertyNotExistsError(err)) {
@@ -585,7 +528,6 @@ export class CyncClient {
 				this.log.debug(
 					'CyncClient: properties unsupported for product_id=%s (mesh id=%s); caching and skipping.',
 					productIdStr,
-					meshIdStr,
 				);
 				return {};
 			}
@@ -597,7 +539,7 @@ export class CyncClient {
 
 				const refreshed = await this.refreshAccessToken(this.tokenData);
 				if (refreshed) {
-					return await this.configClient.getDeviceProperties(productIdStr, meshIdStr);
+					return await this.configClient.getDeviceProperties(productIdStr, String(meshId));
 				}
 			}
 

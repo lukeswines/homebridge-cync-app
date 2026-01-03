@@ -32,6 +32,8 @@ export interface CyncAccessoryContext {
     deviceId: string;
     productId?: string;
 
+    deviceType?: number;
+
     on?: boolean;
     brightness?: number; // 0–100 (LAN "level")
 
