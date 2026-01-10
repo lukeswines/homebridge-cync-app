@@ -2,7 +2,16 @@
 import type { PlatformAccessory } from 'homebridge';
 import type { CyncDevice, CyncDeviceMesh } from './config-client.js';
 import type { CyncAccessoryContext, CyncAccessoryEnv } from './cync-accessory-helpers.js';
-import { applyAccessoryInformationFromCyncDevice, hsvToRgb } from './cync-accessory-helpers.js';
+import {
+	applyAccessoryInformationFromCyncDevice,
+	hsvToRgb,
+	miredToKelvin,
+	resolveDeviceType,
+} from './cync-accessory-helpers.js';
+
+function clampNumber(n: number, min: number, max: number): number {
+	return Math.min(max, Math.max(min, n));
+}
 
 export function configureCyncLightAccessory(
 	env: CyncAccessoryEnv,
@@ -43,13 +52,18 @@ export function configureCyncLightAccessory(
 		productId: device.product_id,
 		on: false,
 	};
-	// Persist deviceType in context so TcpClient can encode brightness correctly for LAN packets.
-	const deviceType =
-		(device as unknown as { deviceType?: number; device_type?: number }).deviceType ??
-		(device as unknown as { deviceType?: number; device_type?: number }).device_type;
+	// Persist deviceType in context so TcpClient can encode correctly for LAN packets.
+	const resolvedDeviceType = resolveDeviceType(device);
 
-	if (typeof deviceType === 'number' && Number.isFinite(deviceType)) {
-		ctx.cync.deviceType = deviceType;
+	if (typeof resolvedDeviceType === 'number' && Number.isFinite(resolvedDeviceType)) {
+		ctx.cync.deviceType = resolvedDeviceType;
+	} else {
+		env.log.debug(
+			'Cync: resolveDeviceType() returned %o for %s (deviceId=%s)',
+			resolvedDeviceType,
+			deviceName,
+			deviceId,
+		);
 	}
 
 	// Remember mapping for LAN updates
@@ -285,6 +299,109 @@ export function configureCyncLightAccessory(
 			} catch (err) {
 				env.log.warn(
 					'Cync: Light Hue.set failed for %s (deviceId=%s): %s',
+					deviceName,
+					cyncMeta.deviceId,
+					(err as Error).message ?? String(err),
+				);
+
+				throw new env.api.hap.HapStatusError(
+					env.api.hap.HAPStatus.SERVICE_COMMUNICATION_FAILURE,
+				);
+			}
+		});
+
+	// ----- Color Temperature (tunable white via LAN tone byte) -----
+	// HomeKit uses mireds. Typical tunable-white range is ~153–500 mired (~6500K–2000K).
+	const ctMinMired = 153;
+	const ctMaxMired = 500;
+
+	service
+		.getCharacteristic(Characteristic.ColorTemperature)
+		.setProps({
+			minValue: ctMinMired,
+			maxValue: ctMaxMired,
+			minStep: 1,
+		})
+		.onGet(() => {
+			const cached = ctx.cync?.colorTemperature;
+
+			// Default: warm-ish white (≈2700K)
+			const value = typeof cached === 'number' ? cached : 370;
+
+			if (env.isDeviceProbablyOffline(deviceId)) {
+				env.log.debug(
+					'Cync: Light ColorTemperature.get offline-heuristic hit; returning cached=%d for %s (deviceId=%s)',
+					value,
+					deviceName,
+					deviceId,
+				);
+			}
+
+			return value;
+		})
+		.onSet(async (value) => {
+			const cyncMeta = ctx.cync;
+
+			if (!cyncMeta?.deviceId) {
+				env.log.warn(
+					'Cync: Light ColorTemperature.set called for %s but no cync.deviceId in context',
+					deviceName,
+				);
+				return;
+			}
+
+			const mired = clampNumber(Number(value), ctMinMired, ctMaxMired);
+			if (!Number.isFinite(mired)) {
+				env.log.warn(
+					'Cync: Light ColorTemperature.set received invalid value=%o for %s (deviceId=%s)',
+					value,
+					deviceName,
+					cyncMeta.deviceId,
+				);
+				return;
+			}
+
+			const kelvin = miredToKelvin(mired);
+
+			// Treat CT as "white mode" (not RGB color mode)
+			cyncMeta.colorTemperature = mired;
+			cyncMeta.colorActive = false;
+
+			const brightness =
+				typeof cyncMeta.brightness === 'number' ? cyncMeta.brightness : 100;
+
+			cyncMeta.on = brightness > 0;
+			cyncMeta.brightness = brightness;
+
+			env.log.info(
+				'Cync: Light ColorTemperature.set -> %d mired (~%dK) for %s (deviceId=%s) brightness=%d',
+				mired,
+				kelvin,
+				deviceName,
+				cyncMeta.deviceId,
+				brightness,
+			);
+
+			try {
+				await env.tcpClient.setColorTemperature(
+					cyncMeta.deviceId,
+					{
+						mired,
+						brightnessPct: brightness,
+						ctMinMired,
+						ctMaxMired,
+
+						// If warm/cool moves the wrong direction for your bulbs,
+						// flip this to true (and later make it configurable).
+						invertTone: false,
+					},
+					cyncMeta.deviceType,
+				);
+
+				env.markDeviceSeen(cyncMeta.deviceId);
+			} catch (err) {
+				env.log.warn(
+					'Cync: Light ColorTemperature.set failed for %s (deviceId=%s): %s',
 					deviceName,
 					cyncMeta.deviceId,
 					(err as Error).message ?? String(err),

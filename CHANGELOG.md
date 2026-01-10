@@ -1,5 +1,44 @@
 # Changelog
 
+## v0.2.0
+
+**Release Date:** 2026-01-09
+
+### Improvements
+- Added first-class **Cync access token refresh** support using the official refresh endpoint.
+- Tokens are now refreshed automatically before expiry, reducing forced logins and downtime.
+- LAN login credentials are preserved and restored correctly across token refreshes.
+- Improved resilience when calling cloud APIs by retrying once after token refresh.
+- Added **Color Temperature (CT)** support for compatible lights, enabling Home.app to control warm/cool white where supported.
+
+### Fixes
+- Fixed incorrect refresh endpoint usage that resulted in 404 and non-JSON errors.
+- Removed unreliable password-only background login fallback that caused
+  `user version error` responses.
+- Improved handling of devices that do not support the properties endpoint
+  (`device property not exists`) and reduced noisy log output.
+- Replaced `[object Object]` error logging with structured, readable error messages.
+
+### Notes
+- **One-time user action required:**
+  Existing users must **sign out and sign back in** (or delete the stored token)
+  once after upgrading to generate a token that includes refresh credentials.
+- If a refresh token is missing or invalid, the plugin will fall back to
+  **interactive 2FA login**.
+- **CT support details:**
+  CT is exposed only on devices that report CT capability. On devices without CT,
+  Home.app will not show the Color Temperature control (expected behavior).
+
+## v0.1.11
+
+**Release Date:** 2026-01-02
+
+### Reliability
+- Improved access token refresh behavior and persistence
+
+### Notes
+- After updating, sign out of the Cync account in Homebridge UI (or remove the stored token file) and sign back in to generate a fresh refresh token.
+
 ## v0.1.10
 
 **Release Date:** 2025-12-26

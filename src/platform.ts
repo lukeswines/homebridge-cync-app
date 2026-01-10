@@ -6,7 +6,7 @@ import type {
 	PlatformAccessory,
 	PlatformConfig,
 } from 'homebridge';
-
+import type { LanDeviceUpdate } from './cync/tcp-client.js';
 import { PLATFORM_NAME } from './settings.js';
 import { CyncClient } from './cync/cync-client.js';
 import { ConfigClient } from './cync/config-client.js';
@@ -17,6 +17,7 @@ import {
 	type CyncAccessoryContext,
 	type CyncAccessoryEnv,
 	resolveDeviceType,
+	rgbToHsv,
 } from './cync/cync-accessory-helpers.js';
 import { configureCyncLightAccessory } from './cync/cync-light-accessory.js';
 import { configureCyncSwitchAccessory } from './cync/cync-switch-accessory.js';
@@ -84,26 +85,16 @@ export class CyncAppPlatform implements DynamicPlatformPlugin {
 		this.devicePollTimers.set(deviceId, timer);
 	}
 
-	private handleLanUpdate(update: unknown): void {
+	private handleLanUpdate(update: LanDeviceUpdate): void {
 		// Parsed LAN frames may look like:
 		// { controllerId: number, deviceId?: string, on: boolean, level: number, brightnessPct?: number }
-		const payload = update as {
-			deviceId?: string;
-			on?: boolean;
-			brightnessPct?: number; // 0–100
-		};
-
-		if (!payload || typeof payload.deviceId !== 'string') {
-			return;
-		}
-
-		const accessory = this.deviceIdToAccessory.get(payload.deviceId);
-		this.markDeviceSeen(payload.deviceId);
+		const accessory = this.deviceIdToAccessory.get(update.deviceId);
+		this.markDeviceSeen(update.deviceId);
 
 		if (!accessory) {
 			this.log.debug(
 				'Cync: LAN update for unknown deviceId=%s; no accessory mapping',
-				payload.deviceId,
+				update.deviceId,
 			);
 			return;
 		}
@@ -119,7 +110,7 @@ export class CyncAppPlatform implements DynamicPlatformPlugin {
 			this.log.debug(
 				'Cync: accessory %s has no Lightbulb or Switch service for deviceId=%s',
 				accessory.displayName,
-				payload.deviceId,
+				update.deviceId,
 			);
 			return;
 		}
@@ -128,29 +119,29 @@ export class CyncAppPlatform implements DynamicPlatformPlugin {
 		const ctx = accessory.context as CyncAccessoryContext;
 		ctx.cync = ctx.cync ?? {
 			meshId: '',
-			deviceId: payload.deviceId,
+			deviceId: update.deviceId,
 		};
 
 		// ----- On/off -----
-		if (typeof payload.on === 'boolean') {
-			ctx.cync.on = payload.on;
+		if (typeof update.on === 'boolean') {
+			ctx.cync.on = update.on;
 
 			this.log.info(
 				'Cync: LAN update -> %s is now %s (deviceId=%s)',
 				accessory.displayName,
-				payload.on ? 'ON' : 'OFF',
-				payload.deviceId,
+				update.on ? 'ON' : 'OFF',
+				update.deviceId,
 			);
 
-			primaryService.updateCharacteristic(Characteristic.On, payload.on);
+			primaryService.updateCharacteristic(Characteristic.On, update.on);
 		}
 
 		// ----- Brightness -----
 		if (lightService) {
 			let brightnessPct: number | undefined;
 
-			if (typeof payload.brightnessPct === 'number' && Number.isFinite(payload.brightnessPct)) {
-				brightnessPct = Math.max(0, Math.min(100, Math.round(payload.brightnessPct)));
+			if (typeof update.brightnessPct === 'number' && Number.isFinite(update.brightnessPct)) {
+				brightnessPct = Math.max(0, Math.min(100, Math.round(update.brightnessPct)));
 			}
 
 			if (brightnessPct !== undefined) {
@@ -160,7 +151,7 @@ export class CyncAppPlatform implements DynamicPlatformPlugin {
 					'Cync: LAN update -> %s brightness=%d (deviceId=%s)',
 					accessory.displayName,
 					brightnessPct,
-					payload.deviceId,
+					update.deviceId,
 				);
 
 				if (lightService.testCharacteristic(Characteristic.Brightness)) {
@@ -170,6 +161,32 @@ export class CyncAppPlatform implements DynamicPlatformPlugin {
 					);
 				}
 			}
+		}
+		// ----- Color (Hue/Sat) -----
+		if (lightService && update.rgb) {
+			const hsv = rgbToHsv(update.rgb.r, update.rgb.g, update.rgb.b);
+
+			// Cache (optional, but helps keep internal state consistent)
+			ctx.cync.hue = hsv.h;
+			ctx.cync.saturation = hsv.s;
+
+			if (lightService.testCharacteristic(Characteristic.Hue)) {
+				lightService.updateCharacteristic(Characteristic.Hue, hsv.h);
+			}
+			if (lightService.testCharacteristic(Characteristic.Saturation)) {
+				lightService.updateCharacteristic(Characteristic.Saturation, hsv.s);
+			}
+
+			this.log.debug(
+				'Cync: LAN update -> %s color rgb=(%d,%d,%d) hsv=(%d,%d) (deviceId=%s)',
+				accessory.displayName,
+				update.rgb.r,
+				update.rgb.g,
+				update.rgb.b,
+				Math.round(hsv.h),
+				Math.round(hsv.s),
+				update.deviceId,
+			);
 		}
 	}
 
@@ -217,8 +234,8 @@ export class CyncAppPlatform implements DynamicPlatformPlugin {
 
 		this.tcpClient = tcpClient;
 
-		// Bridge LAN updates into Homebridge
-		this.client.onLanDeviceUpdate((update) => {
+		// Bridge LAN updates into Homebridge (directly from TcpClient)
+		this.tcpClient.onLanDeviceUpdate((update) => {
 			this.handleLanUpdate(update);
 		});
 
@@ -330,16 +347,26 @@ export class CyncAppPlatform implements DynamicPlatformPlugin {
 			}
 
 			for (const device of devices) {
+				const record = device as unknown as Record<string, unknown>;
+
 				const deviceId =
-					(device.device_id as string | undefined) ??
-					(device.id as string) ??
-					(device.mac as string | undefined) ??
-					(device.sn as string | undefined) ??
-					`${mesh.id}-${device.product_id ?? 'unknown'}`;
+					typeof record.device_id === 'string'
+						? record.device_id
+						: typeof record.device_id === 'number'
+							? String(record.device_id)
+							: typeof record.id === 'string'
+								? record.id
+								: typeof record.id === 'number'
+									? String(record.id)
+									: typeof record.mac === 'string'
+										? record.mac
+										: typeof record.sn === 'string'
+											? record.sn
+											: `${mesh.id}-${String(record.product_id ?? 'unknown')}`;
 
 				const preferredName =
-					(device.name as string | undefined) ??
-					(device.displayName as string | undefined) ??
+					(typeof record.name === 'string' ? record.name : undefined) ??
+					(typeof record.displayName === 'string' ? record.displayName : undefined) ??
 					undefined;
 
 				const deviceName = preferredName || `Cync Device ${deviceId}`;
@@ -363,6 +390,9 @@ export class CyncAppPlatform implements DynamicPlatformPlugin {
 
 					this.accessories.push(accessory);
 				}
+
+				// Optional safety net (accessory modules also register this)
+				this.deviceIdToAccessory.set(deviceId, accessory);
 
 				const deviceType = resolveDeviceType(device);
 				const deviceTypeStr =

@@ -9,6 +9,7 @@ import type { CyncDevice } from './config-client.js';
 import type { TcpClient } from './tcp-client.js';
 import { lookupDeviceModel } from './device-catalog.js';
 
+
 // Narrowed view of the Cync device properties returned by getDeviceProperties()
 type CyncDeviceRaw = {
   displayName?: string;
@@ -37,11 +38,13 @@ export interface CyncAccessoryContext {
     on?: boolean;
     brightness?: number; // 0–100 (LAN "level")
 
-    // Color state (local cache, not yet read from LAN frames)
     hue?: number;          // 0–360
     saturation?: number;   // 0–100
     rgb?: { r: number; g: number; b: number };
     colorActive?: boolean; // true if we last set RGB color
+
+    // Tunable-white state
+	colorTemperature?: number; // mireds (e.g. ~153–500)
   };
   [key: string]: unknown;
 }
@@ -120,6 +123,63 @@ export function hsvToRgb(hue: number, saturation: number, value: number): { r: n
 		r: Math.round(r * 255),
 		g: Math.round(g * 255),
 		b: Math.round(b * 255),
+	};
+}
+
+function clampNumber(n: number, min: number, max: number): number {
+	return Math.min(max, Math.max(min, n));
+}
+
+/**
+ * Color Temperature Converters: Convert HomeKit mired values to Kelvin
+ */
+export function miredToKelvin(mired: number): number {
+	const m = clampNumber(Number(mired), 1, 1_000_000);
+	return Math.round(1_000_000 / m);
+}
+
+/**
+ * Color Temperature Converters: Convert Kelvin to HomeKit mired values
+ */
+export function kelvinToMired(kelvin: number): number {
+	const k = clampNumber(Number(kelvin), 1, 1_000_000);
+	return Math.round(1_000_000 / k);
+}
+
+/**
+* RGB→HSV Converter: Enables HomeKit Hue/Saturation updates from LAN RGB frames
+*/
+export function rgbToHsv(r: number, g: number, b: number): { h: number; s: number; v: number } {
+	const rn = clampNumber(r, 0, 255) / 255;
+	const gn = clampNumber(g, 0, 255) / 255;
+	const bn = clampNumber(b, 0, 255) / 255;
+
+	const max = Math.max(rn, gn, bn);
+	const min = Math.min(rn, gn, bn);
+	const delta = max - min;
+
+	let h = 0;
+	if (delta !== 0) {
+		if (max === rn) {
+			h = ((gn - bn) / delta) % 6;
+		} else if (max === gn) {
+			h = (bn - rn) / delta + 2;
+		} else {
+			h = (rn - gn) / delta + 4;
+		}
+		h *= 60;
+		if (h < 0) {
+			h += 360;
+		}
+	}
+
+	const s = max === 0 ? 0 : (delta / max) * 100;
+	const v = max * 100;
+
+	return {
+		h: clampNumber(h, 0, 360),
+		s: clampNumber(s, 0, 100),
+		v: clampNumber(v, 0, 100),
 	};
 }
 

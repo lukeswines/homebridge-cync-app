@@ -3,6 +3,7 @@
 import { CyncCloudConfig, CyncLogger } from './config-client.js';
 import net from 'net';
 import tls from 'tls';
+import { miredToKelvin } from './cync-accessory-helpers.js';
 
 const defaultLogger: CyncLogger = {
 	debug: (...args: unknown[]) => console.debug('[cync-tcp]', ...args),
@@ -30,6 +31,22 @@ function hkBrightnessToPct100Byte(hkBrightness: number): number {
 	// enforce 1–100 for ON state
 	return clampNumber(hk, 1, 100);
 }
+
+function scaleToByte(value: number, inMin: number, inMax: number, invert: boolean): number {
+	const v = clampNumber(value, inMin, inMax);
+	const t = (v - inMin) / (inMax - inMin); // 0..1
+	const u = invert ? (1 - t) : t;
+	return clampNumber(Math.round(u * 255), 0, 255);
+}
+
+export type LanDeviceUpdate = {
+	deviceId: string;
+	on: boolean;
+	brightnessPct: number;
+	rgb?: { r: number; g: number; b: number };
+};
+
+export type LanDeviceUpdateListener = (update: LanDeviceUpdate) => void;
 
 export class TcpClient {
 	private transportMode: TransportMode | null = null;
@@ -62,6 +79,20 @@ export class TcpClient {
 	private connectInFlight: Promise<void> | null = null;
 	private shuttingDown = false;
 	private deviceBrightnessEncoding = new Map<string, 'pct100' | 'lvl254'>();
+	private readonly lanDeviceUpdateListeners: LanDeviceUpdateListener[] = [];
+
+	public onLanDeviceUpdate(listener: LanDeviceUpdateListener): void {
+		this.lanDeviceUpdateListeners.push(listener);
+	}
+	private emitLanDeviceUpdate(update: LanDeviceUpdate): void {
+		for (const listener of this.lanDeviceUpdateListeners) {
+			try {
+				listener(update);
+			} catch (err) {
+				this.log.error('[Cync TCP] lan device update listener threw: %s', String(err));
+			}
+		}
+	}
 
 	private enqueueCommand<T>(fn: () => Promise<T>): Promise<T> {
 		let resolveWrapper: (value: T | PromiseLike<T>) => void;
@@ -201,6 +232,34 @@ export class TcpClient {
 		this.log = logger ?? defaultLogger;
 	}
 
+	private tryParseRgbFrom83(frame: Buffer): { r: number; g: number; b: number } | undefined {
+		// Look for: db110201 01 012bfe R G B ...
+		// We already know db110201 exists in these payloads (same marker used by legacy parse)
+		const marker = Buffer.from('db110201', 'hex');
+		const idx = frame.indexOf(marker);
+		if (idx === -1) {
+			return undefined;
+		}
+
+		// After marker: [onFlag][level][...]
+		// We’ve observed a sub-marker "2bfe" right before RGB in your samples.
+		const rgbMarker = Buffer.from('2bfe', 'hex');
+		const rgbIdx = frame.indexOf(rgbMarker, idx + marker.length);
+		if (rgbIdx === -1) {
+			return undefined;
+		}
+
+		const start = rgbIdx + rgbMarker.length;
+		if (start + 2 >= frame.length) {
+			return undefined;
+		}
+
+		const r = frame[start];
+		const g = frame[start + 1];
+		const b = frame[start + 2];
+
+		return { r, g, b };
+	}
 
 	public async connect(
 		loginCode: Uint8Array,
@@ -631,6 +690,102 @@ export class TcpClient {
 		});
 	}
 
+	/**
+	 * Color Temperature Sender: Drives tunable-white via the combo_control tone byte (HomeKit mired → 0–255)
+	 */
+	public async setColorTemperature(
+		deviceId: string,
+		params: { mired: number; brightnessPct?: number; ctMinMired?: number; ctMaxMired?: number; invertTone?: boolean },
+		deviceType?: number,
+	): Promise<void> {
+		return this.enqueueCommand(async () => {
+			if (!this.config) {
+				this.log.warn('[Cync TCP] setColorTemperature: no config available.');
+				return;
+			}
+
+			const connected = await this.ensureConnected();
+			if (!connected || !this.socket || this.socket.destroyed) {
+				this.log.warn(
+					'[Cync TCP] setColorTemperature: socket not ready even after reconnect attempt.',
+				);
+				return;
+			}
+
+			const device = this.findDevice(deviceId);
+			if (!device) {
+				this.log.warn('[Cync TCP] setColorTemperature: unknown deviceId=%s', deviceId);
+				return;
+			}
+
+			const record = device as Record<string, unknown>;
+			const controllerId = Number(record.switch_controller);
+			const meshIndex = Number(record.mesh_id);
+
+			if (!Number.isFinite(controllerId) || !Number.isFinite(meshIndex)) {
+				this.log.warn(
+					'[Cync TCP] setColorTemperature: device %s missing LAN fields (switch_controller=%o mesh_id=%o)',
+					deviceId,
+					record.switch_controller,
+					record.mesh_id,
+				);
+				return;
+			}
+
+			const ctMinMired = Number.isFinite(Number(params.ctMinMired)) ? Number(params.ctMinMired) : 153; // ~6500K
+			const ctMaxMired = Number.isFinite(Number(params.ctMaxMired)) ? Number(params.ctMaxMired) : 500; // ~2000K
+
+			const mired = clampNumber(Number(params.mired), ctMinMired, ctMaxMired);
+			if (!Number.isFinite(mired)) {
+				this.log.warn('[Cync TCP] setColorTemperature: invalid mired=%o', params.mired);
+				return;
+			}
+
+			const hkBrightness = Math.max(0, Math.min(100, Math.round(params.brightnessPct ?? 100)));
+			const on = hkBrightness > 0;
+			const level = hkBrightnessToPct100Byte(hkBrightness);
+
+			// Most likely CT control: use tone byte as a scaled CT value.
+			// If it moves the wrong direction (warm↔cool), flip invertTone=true.
+			const invertTone = params.invertTone === true;
+			const tone = scaleToByte(mired, ctMinMired, ctMaxMired, invertTone);
+
+			const kelvin = miredToKelvin(mired);
+
+			const seq = this.nextSeq();
+
+			// Keep RGB at pure white so we’re in "white mode" while tone carries CT.
+			const packet = this.buildComboPacket(
+				controllerId,
+				meshIndex,
+				on,
+				level,
+				tone,
+				{ r: 255, g: 255, b: 255 },
+				seq,
+			);
+
+			this.socket.write(packet);
+
+			this.log.info(
+				'[Cync TCP] Sent combo (CT) packet: device=%s type=%s on=%s mired=%d (~%dK) tone=%d invert=%s brightness=%d level=%d seq=%d',
+				deviceId,
+				String(deviceType),
+				String(on),
+				mired,
+				kelvin,
+				tone,
+				String(invertTone),
+				hkBrightness,
+				level,
+				seq,
+			);
+		});
+	}
+
+	/**
+	 * Brightness Sender: Sends brightness-only combo_control without touching RGB mode
+	 */
 	public async setBrightness(
 		deviceId: string,
 		brightnessPct: number,
@@ -680,6 +835,8 @@ export class TcpClient {
 			const on = clamped > 0;
 			const level = hkBrightnessToPct100Byte(clamped);
 			const seq = this.nextSeq();
+
+			// Keep prior behavior: tone=254, RGB=white.
 			const packet = this.buildComboPacket(
 				controllerId,
 				meshIndex,
@@ -692,12 +849,16 @@ export class TcpClient {
 
 			this.socket.write(packet);
 			this.log.info(
-				'[Cync TCP] Sent combo (brightness) packet: device=%s type=%s on=%s hkBrightness=%d pctByte=%d level=%d seq=%d',
+				'[Cync TCP] Sent combo (brightness) packet: device=%s type=%s on=%s brightnessPct=%d level=%d tone=%d rgb=(%d,%d,%d) seq=%d',
 				deviceId,
 				String(deviceType),
 				String(on),
 				clamped,
 				level,
+				254,
+				255,
+				255,
+				255,
 				seq,
 			);
 		});
@@ -915,8 +1076,19 @@ export class TcpClient {
 		// Mirror the HA integration: try the topology-based parser first.
 		if (type === 0x73 || type === 0x83) {
 			const lanParsed = this.parseLanSwitchUpdate(frame);
-			if (lanParsed) {
+
+			if (lanParsed && lanParsed.deviceId) {
 				payload = lanParsed;
+
+				const rgb = type === 0x83 ? this.tryParseRgbFrom83(frame) : undefined;
+
+				this.emitLanDeviceUpdate({
+					deviceId: lanParsed.deviceId,
+					on: lanParsed.on,
+					brightnessPct: lanParsed.brightnessPct,
+					rgb,
+				});
+
 			} else if (type === 0x83) {
 				// Fallback to legacy controller-level parsing only for 0x83
 				const parsed = this.parseSwitchStateFrame(frame);

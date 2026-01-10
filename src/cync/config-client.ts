@@ -12,10 +12,15 @@ type FetchLike = (input: unknown, init?: unknown) => Promise<unknown>;
 
 declare const fetch: FetchLike;
 
+type HttpHeaders = {
+	get(name: string): string | null;
+};
+
 type HttpResponse = {
 	ok: boolean;
 	status: number;
 	statusText: string;
+	headers?: HttpHeaders;
 	json(): Promise<unknown>;
 	text(): Promise<string>;
 };
@@ -158,9 +163,12 @@ export class ConfigClient {
 		})) as HttpResponse;
 
 		if (!res.ok) {
-			const text = await res.text().catch(() => '');
+			const parsed = await this.readBodyOnce(res);
+			const ct = parsed.contentType ?? 'unknown';
+			const snippet = parsed.text.trim().slice(0, 300);
+
 			this.log.error(
-				`Cync 2FA request failed: HTTP ${res.status} ${res.statusText} ${text}`,
+				`Cync 2FA request failed: HTTP ${res.status} ${res.statusText} (content-type=${ct}) ${snippet}`,
 			);
 			throw new Error(`Cync 2FA request failed with status ${res.status}`);
 		}
@@ -196,14 +204,29 @@ export class ConfigClient {
 			method: 'POST',
 			headers: {
 				'Content-Type': 'application/json',
+				'Accept': 'application/json',
 			},
 			body: JSON.stringify(body),
 		})) as HttpResponse;
 
-		const json: unknown = await res.json().catch(async () => {
-			const text = await res.text().catch(() => '');
-			throw new Error(`Cync login returned non-JSON payload: ${text}`);
-		});
+		const parsed = await this.readBodyOnce(res);
+
+		if (parsed.text.trim().length === 0) {
+			const ct = parsed.contentType ?? 'unknown';
+			throw new Error(
+				`Cync login returned empty body: HTTP ${res.status} ${res.statusText} (content-type=${ct})`,
+			);
+		}
+
+		if (parsed.json === null) {
+			const ct = parsed.contentType ?? 'unknown';
+			const snippet = parsed.text.trim().slice(0, 300);
+			throw new Error(
+				`Cync login returned non-JSON payload: HTTP ${res.status} ${res.statusText} (content-type=${ct}): ${snippet}`,
+			);
+		}
+
+		const json: unknown = parsed.json;
 
 		if (!res.ok) {
 			this.log.error(
@@ -313,14 +336,29 @@ export class ConfigClient {
 			method: 'POST',
 			headers: {
 				'Content-Type': 'application/json',
+				'Accept': 'application/json',
 			},
 			body: JSON.stringify(body),
 		})) as HttpResponse;
 
-		const json: unknown = await res.json().catch(async () => {
-			const text = await res.text().catch(() => '');
-			throw new Error(`Cync password login returned non-JSON payload: ${text}`);
-		});
+		const parsed = await this.readBodyOnce(res);
+
+		if (parsed.text.trim().length === 0) {
+			const ct = parsed.contentType ?? 'unknown';
+			throw new Error(
+				`Cync password login returned empty body: HTTP ${res.status} ${res.statusText} (content-type=${ct})`,
+			);
+		}
+
+		if (parsed.json === null) {
+			const ct = parsed.contentType ?? 'unknown';
+			const snippet = parsed.text.trim().slice(0, 300);
+			throw new Error(
+				`Cync password login returned non-JSON payload: HTTP ${res.status} ${res.statusText} (content-type=${ct}): ${snippet}`,
+			);
+		}
+
+		const json: unknown = parsed.json;
 
 		if (!res.ok) {
 			this.log.error(
@@ -427,27 +465,43 @@ export class ConfigClient {
 	 * refresh_token for a new access_token (and possibly a new refresh_token).
 	 */
 	public async refreshAccessToken(refreshToken: string): Promise<CyncRefreshResponse> {
-		const url = `${CYNC_API_BASE}user_auth/refresh`;
+		// Token Refresh Endpoint: Exchanges refresh_token for a new access token.
+		// The correct endpoint is /v2/user/token/refresh (NOT /v2/user_auth/refresh). :contentReference[oaicite:1]{index=1}
+		const url = `${CYNC_API_BASE}user/token/refresh`;
 		this.log.debug('Refreshing Cync access token…');
 
+		// Known shape used by other integrations: {"refresh_token": "..."} :contentReference[oaicite:2]{index=2}
 		const body = {
-			corp_id: CORP_ID,
 			refresh_token: refreshToken,
-			resource: ConfigClient.randomLoginResource(),
 		};
 
 		const res = (await fetch(url, {
 			method: 'POST',
 			headers: {
 				'Content-Type': 'application/json',
+				'Accept': 'application/json',
 			},
 			body: JSON.stringify(body),
 		})) as HttpResponse;
 
-		const json: unknown = await res.json().catch(async () => {
-			const text = await res.text().catch(() => '');
-			throw new Error(`Cync refresh returned non-JSON payload: ${text}`);
-		});
+		const parsed = await this.readBodyOnce(res);
+
+		if (parsed.text.trim().length === 0) {
+			const ct = parsed.contentType ?? 'unknown';
+			const msg = `Cync refresh returned empty body (HTTP ${res.status} ${res.statusText}, content-type=${ct})`;
+			this.log.error(msg);
+			throw new Error(msg);
+		}
+
+		if (parsed.json === null) {
+			const ct = parsed.contentType ?? 'unknown';
+			const snippet = parsed.text.trim().slice(0, 300);
+			const msg = `Cync refresh returned non-JSON body (HTTP ${res.status} ${res.statusText}, content-type=${ct}): ${snippet}`;
+			this.log.error(msg);
+			throw new Error(msg);
+		}
+
+		const json: unknown = parsed.json;
 
 		if (!res.ok) {
 			this.log.error(
@@ -538,13 +592,30 @@ export class ConfigClient {
 
 		const res = (await fetch(devicesUrl, {
 			method: 'GET',
-			headers,
+			headers: {
+				...headers,
+				'Accept': 'application/json',
+			},
 		})) as HttpResponse;
 
-		const json: unknown = await res.json().catch(async () => {
-			const text = await res.text().catch(() => '');
-			throw new Error(`Cync devices returned non-JSON payload: ${text}`);
-		});
+		const parsed = await this.readBodyOnce(res);
+
+		if (parsed.text.trim().length === 0) {
+			const ct = parsed.contentType ?? 'unknown';
+			throw new Error(
+				`Cync devices returned empty body: HTTP ${res.status} ${res.statusText} (content-type=${ct})`,
+			);
+		}
+
+		if (parsed.json === null) {
+			const ct = parsed.contentType ?? 'unknown';
+			const snippet = parsed.text.trim().slice(0, 300);
+			throw new Error(
+				`Cync devices returned non-JSON payload: HTTP ${res.status} ${res.statusText} (content-type=${ct}): ${snippet}`,
+			);
+		}
+
+		const json: unknown = parsed.json;
 
 		if (!res.ok) {
 			this.log.error(
@@ -618,13 +689,28 @@ export class ConfigClient {
 			method: 'GET',
 			headers: {
 				'Access-Token': this.accessToken as string,
+				'Accept': 'application/json',
 			},
 		})) as HttpResponse;
 
-		const json: unknown = await res.json().catch(async () => {
-			const text = await res.text().catch(() => '');
-			throw new Error(`Cync properties returned non-JSON payload: ${text}`);
-		});
+		const parsed = await this.readBodyOnce(res);
+
+		if (parsed.text.trim().length === 0) {
+			const ct = parsed.contentType ?? 'unknown';
+			throw new Error(
+				`Cync properties returned empty body: HTTP ${res.status} ${res.statusText} (content-type=${ct})`,
+			);
+		}
+
+		if (parsed.json === null) {
+			const ct = parsed.contentType ?? 'unknown';
+			const snippet = parsed.text.trim().slice(0, 300);
+			throw new Error(
+				`Cync properties returned non-JSON payload: HTTP ${res.status} ${res.statusText} (content-type=${ct}): ${snippet}`,
+			);
+		}
+
+		const json: unknown = parsed.json;
 
 		if (!res.ok) {
 			const { code, msg } = extractCyncError(json);
@@ -672,6 +758,38 @@ export class ConfigClient {
 			accessToken: this.accessToken,
 			userId: this.userId,
 		};
+	}
+
+	// HTTP Body Parser: Reads body once; attempts JSON parse; preserves raw text for debugging
+	private async readBodyOnce(res: HttpResponse): Promise<{
+		text: string;
+		json: unknown | null;
+		contentType: string | null;
+	}> {
+		const contentType = res.headers?.get('content-type') ?? null;
+
+		const text = await res.text().catch(() => '');
+		const trimmed = text.trim();
+
+		if (trimmed.length === 0) {
+			return { text, json: null, contentType };
+		}
+
+		// Only attempt JSON parse if it looks like JSON (or content-type claims JSON)
+		const looksJson =
+			trimmed.startsWith('{') ||
+			trimmed.startsWith('[') ||
+			(contentType?.toLowerCase().includes('application/json') ?? false);
+
+		if (!looksJson) {
+			return { text, json: null, contentType };
+		}
+
+		try {
+			return { text, json: JSON.parse(trimmed) as unknown, contentType };
+		} catch {
+			return { text, json: null, contentType };
+		}
 	}
 
 	private ensureSession(): void {
