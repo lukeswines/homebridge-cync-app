@@ -26,6 +26,14 @@ type CyncDeviceWithRaw = CyncDevice & {
   raw?: CyncDeviceRaw;
 };
 
+export interface CyncCapabilityProfile {
+	isLight: boolean;
+	supportsBrightness: boolean;
+	supportsColor: boolean;
+	supportsCt: boolean;
+	source: 'deviceType' | 'cloud' | 'lan';
+}
+
 // Context stored on the accessory
 export interface CyncAccessoryContext {
   cync?: {
@@ -45,6 +53,8 @@ export interface CyncAccessoryContext {
 
     // Tunable-white state
 	colorTemperature?: number; // mireds (e.g. ~153–500)
+	// Capability-based detection & characteristic gating
+	capabilities?: CyncCapabilityProfile;
   };
   [key: string]: unknown;
 }

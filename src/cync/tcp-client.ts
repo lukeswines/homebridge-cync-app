@@ -42,7 +42,7 @@ function scaleToByte(value: number, inMin: number, inMax: number, invert: boolea
 export type LanDeviceUpdate = {
 	deviceId: string;
 	on: boolean;
-	brightnessPct: number;
+	brightnessPct?: number;
 	rgb?: { r: number; g: number; b: number };
 };
 
@@ -80,6 +80,7 @@ export class TcpClient {
 	private shuttingDown = false;
 	private deviceBrightnessEncoding = new Map<string, 'pct100' | 'lvl254'>();
 	private readonly lanDeviceUpdateListeners: LanDeviceUpdateListener[] = [];
+	private observedNonTrivialLevel = new Map<string, boolean>();
 
 	public onLanDeviceUpdate(listener: LanDeviceUpdateListener): void {
 		this.lanDeviceUpdateListeners.push(listener);
@@ -1069,11 +1070,8 @@ export class TcpClient {
 			}
 		}
 
-		// Default payload is the raw frame
 		let payload: unknown = frame;
 
-		// 0x73 / 0x83 carry per-device state updates on the LAN.
-		// Mirror the HA integration: try the topology-based parser first.
 		if (type === 0x73 || type === 0x83) {
 			const lanParsed = this.parseLanSwitchUpdate(frame);
 
@@ -1082,10 +1080,27 @@ export class TcpClient {
 
 				const rgb = type === 0x83 ? this.tryParseRgbFrom83(frame) : undefined;
 
+				let brightnessPct: number | undefined = undefined;
+
+				// Only treat level as meaningful if we've ever seen a non-0/100 value for this device
+				const devId = lanParsed.deviceId;
+				const lvl = lanParsed.brightnessPct;
+
+				const alreadyNonTrivial = this.observedNonTrivialLevel.get(devId) === true;
+				const isNonTrivial = lvl > 0 && lvl < 100;
+
+				if (isNonTrivial) {
+					this.observedNonTrivialLevel.set(devId, true);
+					brightnessPct = lvl;
+				} else if (alreadyNonTrivial) {
+					// Once we know it’s a dimmer, keep reporting 0/100 too.
+					brightnessPct = lvl;
+				}
+
 				this.emitLanDeviceUpdate({
-					deviceId: lanParsed.deviceId,
+					deviceId: devId,
 					on: lanParsed.on,
-					brightnessPct: lanParsed.brightnessPct,
+					brightnessPct,
 					rgb,
 				});
 

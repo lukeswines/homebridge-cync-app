@@ -16,6 +16,7 @@ import type { CyncLogger } from './cync/config-client.js';
 import {
 	type CyncAccessoryContext,
 	type CyncAccessoryEnv,
+	type CyncCapabilityProfile,
 	resolveDeviceType,
 	rgbToHsv,
 } from './cync/cync-accessory-helpers.js';
@@ -30,8 +31,46 @@ const toCyncLogger = (log: Logger): CyncLogger => ({
 });
 
 function isCyncLightDeviceType(deviceType: number | undefined): boolean {
-	return deviceType === 46 || deviceType === 137 || deviceType === 171;
+	return deviceType === 46 || deviceType === 123 || deviceType === 137 || deviceType === 171;
 }
+
+function getDefaultCapabilitiesForDeviceType(deviceType: number | undefined): CyncCapabilityProfile {
+	const isLight = isCyncLightDeviceType(deviceType);
+
+	// Conservative defaults: only claim what you can prove.
+	// We'll promote color/brightness once LAN proves it.
+	return {
+		isLight,
+		supportsBrightness: false,
+		supportsColor: false,
+		supportsCt: false,
+		source: 'deviceType',
+	};
+}
+
+function promoteCapabilitiesFromLan(
+	current: CyncCapabilityProfile,
+	update: LanDeviceUpdate,
+): boolean {
+	let changed = false;
+
+	if (typeof update.brightnessPct === 'number' && Number.isFinite(update.brightnessPct)) {
+		if (!current.supportsBrightness) {
+			current.supportsBrightness = true;
+			current.source = 'lan';
+			changed = true;
+		}
+	}
+
+	if (update.rgb && !current.supportsColor) {
+		current.supportsColor = true;
+		current.source = 'lan';
+		changed = true;
+	}
+
+	return changed;
+}
+
 
 export class CyncAppPlatform implements DynamicPlatformPlugin {
 	public readonly accessories: PlatformAccessory[] = [];
@@ -121,6 +160,18 @@ export class CyncAppPlatform implements DynamicPlatformPlugin {
 			meshId: '',
 			deviceId: update.deviceId,
 		};
+		if (!ctx.cync.capabilities) {
+			ctx.cync.capabilities = getDefaultCapabilitiesForDeviceType(ctx.cync.deviceType);
+		}
+		const promoted = promoteCapabilitiesFromLan(ctx.cync.capabilities, update);
+		if (promoted) {
+			this.log.debug(
+				'Cync: capabilities promoted for %s (deviceId=%s) -> %o',
+				accessory.displayName,
+				update.deviceId,
+				ctx.cync.capabilities,
+			);
+		}
 
 		// ----- On/off -----
 		if (typeof update.on === 'boolean') {
@@ -155,10 +206,7 @@ export class CyncAppPlatform implements DynamicPlatformPlugin {
 				);
 
 				if (lightService.testCharacteristic(Characteristic.Brightness)) {
-					lightService.updateCharacteristic(
-						Characteristic.Brightness,
-						brightnessPct,
-					);
+					lightService.updateCharacteristic(Characteristic.Brightness, brightnessPct);
 				}
 			}
 		}

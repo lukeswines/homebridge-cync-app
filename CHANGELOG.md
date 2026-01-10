@@ -1,5 +1,22 @@
 # Changelog
 
+## v0.2.1
+
+**Release Date:** 2026-01-09
+
+### Fixes
+- Fixed accessory discovery / classification so the Direct Connect Smart Light Strip (deviceType=123) is configured as a Lightbulb rather than a Switch.
+- Fixed TypeScript build issues around device catalog typing and Homebridge `Categories` imports.
+
+### Improvements
+- Introduced capability-based detection scaffolding:
+  - Added a capability profile to accessory context.
+  - Promotes capabilities at runtime based on observed LAN state (brightness and RGB).
+- Expanded device catalog metadata for light strip support (model/marketing details).
+
+### Notes
+- Capability detection is conservative and may promote features after first LAN updates; HomeKit characteristics are only updated when present on the service.
+
 ## v0.2.0
 
 **Release Date:** 2026-01-09
