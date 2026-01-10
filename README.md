@@ -36,6 +36,24 @@ It currently supports:
 ```
 2. Restart Homebridge.
 
+## Upgrade Notes
+
+### v0.2.0 (Authentication & CT Support)
+
+This release adds automatic token refresh and Color Temperature (CT) support.
+
+**One-time action required when upgrading from v0.1.x:**
+- You must **sign out and sign back in** (or delete the stored token) once after upgrading.
+- This allows the plugin to obtain a token that includes refresh credentials.
+
+After this one-time re-auth:
+- Access tokens will refresh automatically before expiry.
+- Manual re-login should be much less frequent.
+
+**Color Temperature (CT):**
+- CT controls are exposed in Home.app only for devices that report CT capability.
+- Devices without CT support will not show a Color Temperature control (expected behavior).
+
 ## Configuration
 
 Add a platform entry to your Homebridge `config.json`:
