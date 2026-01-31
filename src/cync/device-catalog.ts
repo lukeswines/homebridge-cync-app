@@ -60,6 +60,19 @@ export const DEVICE_CATALOG: Record<number, CyncDeviceModel> = {
 			supportsCt: false,
 		},
 	},
+	110: {
+		deviceType: 110,
+		modelName: 'Direct Connect Strip - Thin Style (16ft)',
+		marketingName: 'Direct Connect Smart Light Strip',
+		defaultCategory: Categories.LIGHTBULB,
+		notes: 'Full color light strip; cloud payload lacks color/level fields, so prefer LAN capability/state detection.',
+		defaultCapabilities: {
+			isLight: true,
+			supportsBrightness: true,
+			supportsColor: true,
+			supportsCt: true,
+		},
+	},
 	123: {
 		deviceType: 123,
 		modelName: 'Direct Connect Strip - Thin Style (32ft)',
