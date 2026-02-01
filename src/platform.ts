@@ -31,7 +31,7 @@ const toCyncLogger = (log: Logger): CyncLogger => ({
 });
 
 function isCyncLightDeviceType(deviceType: number | undefined): boolean {
-	return deviceType === 46 || deviceType === 123 || deviceType === 137 || deviceType === 171;
+	return deviceType === 46 || deviceType === 123 || deviceType === 137 || deviceType === 171 || deviceType === 110;
 }
 
 function getDefaultCapabilitiesForDeviceType(deviceType: number | undefined): CyncCapabilityProfile {
